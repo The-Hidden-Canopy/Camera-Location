@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-import curses
+# curses ships with Python on Linux/macOS but NOT with stock Windows Python.
+# Import defensively so this module is always importable; the TUI simply
+# refuses to start (with a clear message) when curses is missing, and the
+# CLI falls back automatically. The web UI is unaffected.
+try:
+    import curses
+    _CURSES_ERR = ""
+except Exception as _e:           # ModuleNotFoundError: No module named '_curses'
+    curses = None
+    _CURSES_ERR = str(_e)
+
 import threading
 import time
 from datetime import datetime
@@ -33,7 +43,14 @@ class Dashboard:
         self.orchestrator.set_interface(iface)
 
     def run(self, mode: str):
-        """Start the curses TUI."""
+        """Start the curses TUI. Raises a clear error (caught by the CLI,
+        which then falls back to plain CLI mode) when curses is unavailable
+        — e.g. stock Windows Python has no _curses module."""
+        if curses is None:
+            raise RuntimeError(
+                f"TUI needs the 'curses' module which is not available "
+                f"({_CURSES_ERR}). Use 'camera-discover scan --no-dashboard' "
+                f"or the web UI: 'camera-discover web'.")
         curses.wrapper(self._main_loop, mode)
 
     def _main_loop(self, stdscr, mode: str):
@@ -143,7 +160,7 @@ class Dashboard:
             if y >= h - 8:
                 break
 
-            score_str = f"{d.confidence}%"
+            score_str = f"{d.camera_confidence}%"   # Gap 11
             ports_str = ",".join(str(p) for p in d.open_ports[:6])
             proto_str = ",".join(d.protocols[:3])
 
@@ -154,11 +171,11 @@ class Dashboard:
             else:
                 # Color code by confidence
                 color = 0
-                if d.confidence >= 70:
+                if d.camera_confidence >= 70:
                     color = curses.color_pair(2)
-                elif d.confidence >= 40:
+                elif d.camera_confidence >= 40:
                     color = curses.color_pair(3)
-                elif d.confidence > 0:
+                elif d.camera_confidence > 0:
                     color = curses.color_pair(4)
                 stdscr.addstr(y, 0, line[:w-1], color)
 
@@ -218,7 +235,10 @@ class Dashboard:
         self._selected_row = 0
         self._scroll_offset = 0
         self._progress = 0
-        self.orchestrator.devices.clear()
+        # _full_reset() wipes devices + all triage queues; run() will call it
+        # again with clear=True (the default) but calling it here ensures the
+        # TUI device list and the orchestrator are in sync before the thread starts.
+        self.orchestrator._full_reset()
 
         thread = threading.Thread(
             target=self._run_discovery, args=(mode,), daemon=True

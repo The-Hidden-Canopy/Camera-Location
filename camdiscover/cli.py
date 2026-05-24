@@ -68,6 +68,7 @@ def main():
     web_parser = subparsers.add_parser("web", help="Launch web dashboard UI")
     web_parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     web_parser.add_argument("--port", type=int, default=5000, help="Bind port (default: 5000)")
+    web_parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser (used by Electron)")
 
     # subnets command
     subnet_parser = subparsers.add_parser("subnets", help="Manage subnet zones")
@@ -296,14 +297,15 @@ def run_web(args):
 
     print_header(f"\n  Camera Discovery Octopus — Web UI")
     print(f"\n  \033[1;32m{url}\033[0m\n")
-    print(f"  Opening browser automatically...")
     print(f"  Press Ctrl+C to stop\n")
 
-    # Open browser after Flask is up (short delay)
-    def _open():
-        import time; time.sleep(1.2)
-        webbrowser.open(url)
-    threading.Thread(target=_open, daemon=True).start()
+    # Open browser unless suppressed (e.g. Electron opens it itself)
+    if not getattr(args, 'no_browser', False):
+        def _open():
+            import time; time.sleep(1.2)
+            webbrowser.open(url)
+        threading.Thread(target=_open, daemon=True).start()
+        print(f"  Opening browser automatically...")
 
     app.run(host=host, port=port, debug=False, threaded=True)
 

@@ -12,7 +12,6 @@ import threading
 import time
 import urllib.request
 import uuid
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -68,6 +67,7 @@ def send_onvif_probe(interface_ip: str = "", timeout: float = 3.0) -> List[Onvif
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         if interface_ip:
             try:
                 sock.setsockopt(
@@ -82,20 +82,21 @@ def send_onvif_probe(interface_ip: str = "", timeout: float = 3.0) -> List[Onvif
             struct.pack("b", 4)
         )
 
-        # Bind to ONVIF port to receive direct replies
-        try:
-            sock.bind(("", ONVIF_PORT))
-        except OSError:
-            # Port in use, bind to any port
-            sock.bind(("", 0))
-
-        try:
-            sock.setsockopt(
-                socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
-                socket.inet_aton(ONVIF_MULTICAST) + socket.inet_aton(interface_ip or "0.0.0.0")
-            )
-        except Exception:
-            pass
+        # CRITICAL: bind to an EPHEMERAL port, never the well-known 3702.
+        #
+        # The always-on DPICollector binds UDP 3702 for passive WS-Discovery
+        # (Hello/Bye). If this active probe also bound 3702, two sockets would
+        # share the port; on Windows the OS delivers each incoming unicast
+        # datagram to only ONE of them, non-deterministically — so the 66
+        # ProbeMatch replies get split arbitrarily between the two sockets and
+        # this probe sees only a random fraction (the "66 vs 7" bug).
+        #
+        # WS-Discovery ProbeMatch replies are unicast back to the *source port*
+        # of the Probe, so an ephemeral source port receives them all cleanly
+        # with zero contention. Any non-conformant camera that replies only to
+        # the multicast group is still caught by the DPICollector on 3702.
+        # (This mirrors send_ssdp_search, which already binds ("", 0).)
+        sock.bind(("", 0))
 
         # Start listener thread
         listener_thread = threading.Thread(target=listener, args=(sock,), daemon=True)
@@ -302,9 +303,13 @@ def scan_port(ip: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
-def scan_ports(ip: str, ports: List[int] = None, timeout: float = 3.0,
+def scan_ports(ip: str, ports: List[int] = None, timeout: float = 1.5,
                callback: Callable = None) -> List[int]:
-    """Scan all camera ports on a host concurrently."""
+    """Scan discovery-relevant TCP ports on a host.
+    Ports for one device are probed concurrently (bounded, fast) but the
+    orchestrator ensures only one device is fingerprinted at a time.
+    Timeout reduced to 1.5 s: open ports on LAN reply in <10 ms; firewalled
+    ports that don't RST are the only ones that hit the timeout ceiling."""
     if ports is None:
         ports = ALL_CAMERA_PORTS
     open_ports = _scan_port_batch(ip, ports, timeout)
@@ -314,7 +319,8 @@ def scan_ports(ip: str, ports: List[int] = None, timeout: float = 3.0,
 
 
 def _scan_port_batch(ip: str, ports: List[int], timeout: float) -> List[int]:
-    """Scan a batch of ports concurrently."""
+    """Probe all ports of a single device concurrently.
+    This is bounded to len(ports) threads (≤ 12) — not a scalability concern."""
     open_ports: List[int] = []
     lock = threading.Lock()
 
@@ -325,12 +331,12 @@ def _scan_port_batch(ip: str, ports: List[int], timeout: float) -> List[int]:
 
     threads = []
     for port in ports:
-        t = threading.Thread(target=check_port, args=(port,))
+        t = threading.Thread(target=check_port, args=(port,), daemon=True)
         t.start()
         threads.append(t)
 
     for t in threads:
-        t.join(timeout=timeout + 1)
+        t.join(timeout=timeout + 0.5)
 
     return sorted(open_ports)
 
@@ -364,39 +370,87 @@ def grab_http_banner(ip: str, port: int = 80, timeout: float = 3.0) -> str:
         return ""
 
 
+def reverse_dns_name(ip: str, timeout: float = 1.5) -> str:
+    """Best-effort reverse DNS lookup for generic host enrichment."""
+    old_timeout = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(timeout)
+        host, _, _ = socket.gethostbyaddr(ip)
+        return (host or "").strip().rstrip(".")
+    except Exception:
+        return ""
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+
+
 # ─── RTSP Probe ─────────────────────────────────────────────────────
 
 @dataclass
 class RtspResult:
     found: bool
     banner: str
+    described: bool = False
+    has_video_sdp: bool = False
+    url: str = ""
 
 
 def probe_rtsp(ip: str, port: int = 554, timeout: float = 3.0) -> RtspResult:
-    """Probe an RTSP server."""
+    """Probe an RTSP server with OPTIONS and a best-effort DESCRIBE."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect((ip, port))
 
-        request = "OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n"
-        sock.sendall(request.encode("utf-8"))
+        requests = [
+            "OPTIONS * RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: CamDiscover/1.0\r\n\r\n",
+            (
+                f"DESCRIBE rtsp://{ip}:{port}/ RTSP/1.0\r\n"
+                "CSeq: 2\r\n"
+                "Accept: application/sdp\r\n"
+                "User-Agent: CamDiscover/1.0\r\n\r\n"
+            ),
+        ]
 
-        response = b""
-        while True:
-            try:
-                chunk = sock.recv(4096)
-                if not chunk:
+        responses: list[str] = []
+        for request in requests:
+            sock.sendall(request.encode("utf-8"))
+            response = b""
+            while True:
+                try:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+                    if len(response) > 8192:
+                        break
+                    hdr_end = response.find(b"\r\n\r\n")
+                    if hdr_end == -1:
+                        continue          # headers not complete yet
+                    # Parse Content-Length so we know whether a body follows.
+                    # Without this, OPTIONS response data can leak into the
+                    # subsequent DESCRIBE read because we break too early.
+                    cl_m = re.search(rb"Content-Length:\s*(\d+)", response, re.IGNORECASE)
+                    if not cl_m:
+                        break             # no body — response complete
+                    body_needed = int(cl_m.group(1))
+                    if len(response) >= hdr_end + 4 + body_needed:
+                        break             # full body received
+                except socket.timeout:
                     break
-                response += chunk
-                if len(response) > 4096:
-                    break
-            except socket.timeout:
-                break
+            responses.append(response.decode("utf-8", errors="replace"))
 
         sock.close()
-        resp_str = response.decode("utf-8", errors="replace")
-        return RtspResult(found="rtsp" in resp_str.lower(), banner=resp_str)
+        combined = "\n".join(r for r in responses if r)
+        lower = combined.lower()
+        described = "describe" in lower and "rtsp/" in lower
+        has_video_sdp = "m=video" in lower or "a=rtpmap" in lower
+        return RtspResult(
+            found="rtsp" in lower,
+            banner=combined,
+            described=described,
+            has_video_sdp=has_video_sdp,
+            url=f"rtsp://{ip}:{port}/",
+        )
     except Exception:
         return RtspResult(found=False, banner="")
 
@@ -765,3 +819,205 @@ class PassiveListener:
                     continue
         except Exception:
             pass
+
+
+# ─── mDNS Active Probe ───────────────────────────────────────────────
+
+@dataclass
+class MdnsDevice:
+    ip: str
+    service_type: str = ""
+    name: str = ""
+    port: int = 0
+    raw_response: str = ""
+
+
+def send_mdns_probe(interface_ip: str = "", timeout: float = 3.0) -> List[MdnsDevice]:
+    """Send active mDNS queries for camera-related service types.
+
+    mDNS (RFC 6762) queries multicast 224.0.0.251:5353 for:
+      _onvif._tcp.local       — ONVIF cameras
+      _rtsp._tcp.local        — RTSP servers
+      _axis-video._tcp.local  — Axis cameras
+      _hikvision._tcp.local   — Hikvision devices (non-standard)
+    """
+    MDNS_MULTICAST = "224.0.0.251"
+    MDNS_PORT = 5353
+
+    camera_services = [
+        "_onvif._tcp.local",
+        "_rtsp._tcp.local",
+        "_axis-video._tcp.local",
+        "_hikvision._tcp.local",
+    ]
+
+    devices: List[MdnsDevice] = []
+    seen: set = set()
+    lock = threading.Lock()
+
+    def build_mdns_query(name: str) -> bytes:
+        header = struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0)
+        qname = b""
+        for label in name.split("."):
+            qname += struct.pack("B", len(label)) + label.encode("ascii")
+        qname += b"\x00"
+        question = qname + struct.pack("!HH", 12, 1)  # PTR, IN
+        return header + question
+
+    def listener(sock: socket.socket):
+        sock.settimeout(timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, addr = sock.recvfrom(65535)
+                if len(data) < 12:
+                    continue
+                src_ip = addr[0]
+                flags = struct.unpack("!H", data[2:4])[0]
+                if not (flags & 0x8000):
+                    continue
+                device = _parse_mdns_response(data, src_ip)
+                if device:
+                    key = (device.ip, device.service_type)
+                    with lock:
+                        if key not in seen:
+                            seen.add(key)
+                            devices.append(device)
+            except socket.timeout:
+                break
+            except Exception:
+                continue
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if interface_ip:
+            try:
+                sock.setsockopt(
+                    socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                    socket.inet_aton(interface_ip)
+                )
+            except Exception:
+                pass
+        try:
+            sock.bind(("", 0))
+        except OSError:
+            sock.bind(("", 5353))
+        try:
+            sock.setsockopt(
+                socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                socket.inet_aton(MDNS_MULTICAST) + socket.inet_aton(interface_ip or "0.0.0.0")
+            )
+        except Exception:
+            pass
+
+        listener_thread = threading.Thread(target=listener, args=(sock,), daemon=True)
+        listener_thread.start()
+
+        for svc in camera_services:
+            try:
+                query = build_mdns_query(svc)
+                sock.sendto(query, (MDNS_MULTICAST, MDNS_PORT))
+            except Exception:
+                pass
+
+        listener_thread.join(timeout=timeout)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    return devices
+
+
+def _parse_mdns_response(data: bytes, src_ip: str) -> Optional[MdnsDevice]:
+    try:
+        if len(data) < 12:
+            return None
+        qdcount = struct.unpack("!H", data[4:6])[0]
+        ancount = struct.unpack("!H", data[6:8])[0]
+        if ancount == 0:
+            return None
+
+        pos = 12
+        for _ in range(qdcount):
+            while pos < len(data):
+                label_len = data[pos]
+                pos += 1
+                if label_len == 0:
+                    break
+                pos += label_len
+            pos += 4
+
+        for _ in range(ancount):
+            if pos + 10 > len(data):
+                break
+            while pos < len(data):
+                label_len = data[pos]
+                if label_len == 0:
+                    pos += 1
+                    break
+                if label_len >= 0xC0:
+                    pos += 2
+                    break
+                pos += 1 + label_len
+            rtype = struct.unpack("!H", data[pos:pos+2])[0]
+            pos += 2
+            pos += 2  # class
+            pos += 4  # ttl
+            rdlength = struct.unpack("!H", data[pos:pos+2])[0]
+            pos += 2
+            rdata = data[pos:pos+rdlength]
+            pos += rdlength
+
+            if rtype == 12:  # PTR record
+                try:
+                    ptr_name = _decode_dns_name(data, rdata)
+                    return MdnsDevice(
+                        ip=src_ip,
+                        service_type=_extract_service_type(ptr_name),
+                        name=ptr_name,
+                        raw_response=data[:200].hex(),
+                    )
+                except Exception:
+                    pass
+        return None
+    except Exception:
+        return None
+
+
+def _decode_dns_name(full_packet: bytes, name_data: bytes) -> str:
+    labels = []
+    pos_in_rd = 0
+    seen_ptrs = set()
+    while pos_in_rd < len(name_data):
+        label_len = name_data[pos_in_rd]
+        if label_len == 0:
+            break
+        if label_len >= 0xC0:
+            pointer = ((label_len & 0x3F) << 8) | name_data[pos_in_rd + 1]
+            if pointer in seen_ptrs or pointer >= len(full_packet):
+                break
+            seen_ptrs.add(pointer)
+            sub = _decode_dns_name(full_packet, full_packet[pointer:])
+            if sub:
+                labels.append(sub)
+            break
+        else:
+            pos_in_rd += 1
+            label = name_data[pos_in_rd:pos_in_rd + label_len]
+            try:
+                labels.append(label.decode("ascii", errors="replace"))
+            except Exception:
+                pass
+            pos_in_rd += label_len
+    return ".".join(labels)
+
+
+def _extract_service_type(name: str) -> str:
+    lower = name.lower()
+    for svc in ("_onvif._tcp", "_rtsp._tcp", "_axis-video._tcp", "_hikvision._tcp"):
+        if svc in lower:
+            return svc + ".local"
+    return name

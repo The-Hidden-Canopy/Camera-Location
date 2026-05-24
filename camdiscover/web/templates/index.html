@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Camera Discovery Octopus</title>
+  <title>Hidden Canopy Network Discovery</title>
   <link rel="stylesheet" href="/static/css/shell.css">
   <link rel="stylesheet" href="/static/css/dashboard.css">
 </head>
@@ -14,7 +14,7 @@
     <div class="cam__titlebar" id="electron-titlebar" style="display:none;">
       <div class="cam__titlebar__drag">
         <span class="cam__titlebar__icon">&#9673;</span>
-        <span class="cam__titlebar__title">Camera Discovery Octopus</span>
+        <span class="cam__titlebar__title">Hidden Canopy Network Discovery</span>
       </div>
       <div class="cam__titlebar__controls">
         <button class="cam__titlebar__btn cam__titlebar__btn--minimize" id="btn-minimize" title="Minimize">&#9472;</button>
@@ -80,6 +80,9 @@
       <button class="cam__scan-btn cam__scan-btn--start" id="scan-btn">
         <span class="cam__scan-btn__icon">&#9654;</span> Start Scan
       </button>
+      <button class="cam__clear-btn" id="clear-btn" title="Clear all discovered devices and start fresh">
+        &#10005; Clear
+      </button>
 
       <div class="cam__header-divider"></div>
 
@@ -95,6 +98,15 @@
       </div>
     </header>
 
+    <!-- ═══ Sweep Subnet Bar (only shown when Sweep mode is active) ═══ -->
+    <div class="cam__sweep-bar" id="sweep-bar">
+      <span class="cam__sweep-bar__label">Target subnets</span>
+      <input type="text" id="sweep-subnets" class="cam__sweep-bar__input"
+             placeholder="172.16.1-22.0/24, 192.168.1.0/24  —  leave blank to auto-detect"
+             title="Enter comma-separated subnets or use range notation: 172.16.1-22.0/24">
+      <span class="cam__sweep-bar__hint">Ranges like <code>172.16.1-22.0/24</code> expand to individual /24s. A temporary IP is added for each unreachable subnet.</span>
+    </div>
+
     <!-- ═══ Body ═══ -->
     <div class="cam__body">
 
@@ -107,6 +119,13 @@
         <div class="cam__sidebar-section">
           <div class="cam__sidebar-section-label">Vendors</div>
           <div class="cam__sidebar-filters" id="vendor-filters">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+
+        <div class="cam__sidebar-section">
+          <div class="cam__sidebar-section-label">Device Types</div>
+          <div class="cam__sidebar-filters" id="type-filters">
             <!-- Populated dynamically -->
           </div>
         </div>
@@ -134,7 +153,7 @@
         </div>
 
         <div class="cam__sidebar-section">
-          <div class="cam__sidebar-section-label">Confidence</div>
+          <div class="cam__sidebar-section-label">Camera Confidence</div>
           <div class="cam__confidence-slider">
             <input type="range" min="0" max="100" value="0" id="confidence-filter" class="cam__slider">
             <span class="cam__confidence-val" id="confidence-val">0%+</span>
@@ -180,7 +199,7 @@
             </div>
             <div class="cam__stat-item">
               <span class="cam__stat-val" id="stat-cameras">0</span>
-              <span class="cam__stat-label">Cameras</span>
+              <span class="cam__stat-label">Camera-like</span>
             </div>
             <div class="cam__stat-item">
               <span class="cam__stat-val" id="stat-onvif">0</span>

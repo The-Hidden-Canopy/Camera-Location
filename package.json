@@ -1,19 +1,20 @@
 {
-  "name": "camera-discovery-octopus",
+  "name": "hidden-canopy-network-discovery",
   "version": "1.0.0",
   "description": "Vendor-agnostic IP camera discovery tool — Electron desktop wrapper",
   "main": "electron/main.js",
   "scripts": {
+    "stage:python-runtime": "node scripts/stage-python-runtime.js",
     "start": "electron .",
     "start:dev": "electron . --dev",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder",
-    "dist:win": "electron-builder --win",
+    "pack": "npm run stage:python-runtime && electron-builder --dir",
+    "dist": "npm run stage:python-runtime && electron-builder",
+    "dist:win": "npm run stage:python-runtime && electron-builder --win",
     "postinstall": "electron-builder install-app-deps"
   },
   "build": {
-    "appId": "com.hiddencanopy.camera-discovery",
-    "productName": "Camera Discovery Octopus",
+    "appId": "com.hiddencanopy.network-discovery",
+    "productName": "Hidden Canopy Network Discovery",
     "directories": {
       "output": "dist"
     },
@@ -45,10 +46,14 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Camera Discovery Octopus",
+      "shortcutName": "Hidden Canopy Network Discovery",
       "runAfterFinish": true
     },
     "extraResources": [
+      {
+        "from": ".bundled-runtime/python",
+        "to": "python"
+      },
       {
         "from": "camdiscover",
         "to": "camdiscover"

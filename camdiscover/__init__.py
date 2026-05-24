@@ -6,16 +6,26 @@ Passive sniffer + DHCP catcher + ONVIF finder + RTSP/web scanner + MAC/vendor id
 
 __version__ = "1.0.0"
 
-# Camera ports reference
+# Primary TCP service ports used for discovery and coarse classification.
+# We still bias toward camera/NVR protocols, but include a small set of
+# common infrastructure and endpoint services so the app can classify more
+# than just cameras.
 CAMERA_PORTS = {
+    22:      "SSH management",
+    23:      "Telnet management",
+    53:      "DNS service",
     80:      "HTTP web UI",
     443:     "HTTPS web UI",
     554:     "RTSP streaming",
+    631:     "IPP printing",
     8000:    "Hikvision SDK/service",
     8080:    "Alternate web UI",
     8443:    "Alternate HTTPS",
     8554:    "Alternate RTSP",
     8899:    "ONVIF device service",
+    9100:    "JetDirect printing",
+    3389:    "RDP",
+    445:     "SMB file sharing",
     37777:   "Dahua/Amcrest service",
     37778:   "Dahua alternate",
     3702:    "ONVIF WS-Discovery (UDP)",

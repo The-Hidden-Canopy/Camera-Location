@@ -1,9 +1,11 @@
 """Network interface detection and low-level network operations for Windows"""
 
 from __future__ import annotations
+import atexit
 import ipaddress
 import os
 import re
+import signal
 import socket
 import subprocess
 import struct
@@ -11,7 +13,94 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Set, Tuple
+
+
+# ─── Temporary-IP registry ────────────────────────────────────────────────
+#
+# Every secondary/temporary IP we add to an interface via netsh is recorded
+# here as an (interface_name, ip) pair.  This is the single source of truth
+# for "what netsh changes has this process made", so we can ALWAYS undo them
+# even if a sweep is killed mid-flight, the app window is closed, or the
+# process is taskkill'd.  Leaked secondary IPs leave stale on-link routes in
+# the Windows routing table, which is what previously caused spurious
+# multi-subnet pulls — so reliable teardown is critical, not best-effort.
+#
+# _NETSH_LOCK serialises ALL netsh add/delete calls process-wide: Windows
+# misbehaves if two interface-modification commands run at once.
+_TEMP_IPS: Set[Tuple[str, str]] = set()
+_NETSH_LOCK = threading.RLock()
+
+
+def _run_netsh(args: List[str]) -> bool:
+    """Run a netsh command under the global lock. Returns True on rc==0."""
+    with _NETSH_LOCK:
+        try:
+            result = subprocess.run(
+                ["netsh"] + args,
+                capture_output=True, text=True, timeout=10,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+
+def cleanup_temp_ips(interface_name: str = "") -> int:
+    """Remove every temporary IP this process added (optionally just one
+    interface's).  Safe to call repeatedly and from any thread/handler.
+
+    Returns the number of addresses removed.  This is THE teardown entry
+    point — called when a scan finishes, when it's stopped, on normal
+    interpreter exit (atexit), and on SIGINT/SIGTERM.
+    """
+    with _NETSH_LOCK:
+        targets = [(ifc, ip) for (ifc, ip) in _TEMP_IPS
+                   if not interface_name or ifc == interface_name]
+        removed = 0
+        for ifc, ip in targets:
+            ok_v4 = _run_netsh(["interface", "ipv4", "delete", "address", ifc, ip])
+            # Older add path used "interface ip"; try that form too.
+            ok_v = _run_netsh(["interface", "ip", "delete", "address", ifc, ip])
+            _TEMP_IPS.discard((ifc, ip))
+            if ok_v4 or ok_v:
+                removed += 1
+        return removed
+
+
+_signal_handlers_installed = False
+
+
+def install_signal_handlers() -> None:
+    """Install SIGINT/SIGTERM handlers that clear netsh before exiting.
+
+    Must be called from the main thread (signal limitation).  atexit covers
+    normal exit and KeyboardInterrupt; signal handlers cover taskkill /
+    Electron window close / service stop where atexit may not fire.
+    """
+    global _signal_handlers_installed
+    if _signal_handlers_installed:
+        return
+    _signal_handlers_installed = True
+
+    def _handler(signum, frame):
+        # Clear every netsh change first, then exit hard so a half-done
+        # sweep can't leave the interface in a modified state.
+        try:
+            cleanup_temp_ips()
+        finally:
+            os._exit(130 if signum == getattr(signal, "SIGINT", None) else 0)
+
+    for signame in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, signame, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, _handler)
+            except (ValueError, OSError):
+                pass  # not main thread / unsupported — atexit still covers us
+
+
+# atexit fires on normal exit and on unhandled KeyboardInterrupt.
+atexit.register(cleanup_temp_ips)
 
 
 @dataclass
@@ -173,7 +262,13 @@ def classify_interface(name: str, description: str = "") -> str:
         return "virtual"
     if any(x in lower for x in ["wi-fi", "wireless", "wlan", "802.11"]):
         return "wi-fi"
-    if any(x in lower for x in ["ethernet", "eth", "local area", "rj45"]):
+    # "ethernet" / "eth" / "local area" cover most adapters.
+    # Also match "gigabit" and "gbe" for Realtek/Intel adapters whose descriptions
+    # say "PCIe GbE Family Controller" or "Gigabit Network Connection" without the
+    # word "ethernet" — these are always wired.
+    if any(x in lower for x in ["ethernet", "eth", "local area", "rj45",
+                                  "gigabit", "gbe", "10gbe", "2.5gbe", "10/100",
+                                  "family controller", "network connection"]):
         return "ethernet"
     return "unknown"
 
@@ -228,29 +323,28 @@ def ping_host(ip: str, timeout: int = 2000) -> bool:
 
 
 def add_temp_ip(interface_name: str, ip: str, netmask: str = "255.255.255.0") -> bool:
-    """Add a temporary IP address to an interface (requires admin)."""
-    try:
-        result = subprocess.run(
-            ["netsh", "interface", "ip", "add", "address",
-             interface_name, ip, netmask],
-            capture_output=True, text=True, timeout=10
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    """Add a temporary IP address to an interface (requires admin).
+
+    On success the (interface, ip) pair is registered so cleanup_temp_ips()
+    can always tear it down later, even on crash/kill.
+    """
+    ok = _run_netsh(["interface", "ip", "add", "address",
+                     interface_name, ip, netmask])
+    if ok:
+        with _NETSH_LOCK:
+            _TEMP_IPS.add((interface_name, ip))
+    return ok
 
 
 def remove_temp_ip(interface_name: str, ip: str) -> bool:
     """Remove a temporary IP address from an interface (requires admin)."""
-    try:
-        result = subprocess.run(
-            ["netsh", "interface", "ip", "delete", "address",
-             interface_name, ip],
-            capture_output=True, text=True, timeout=10
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    ok = _run_netsh(["interface", "ip", "delete", "address",
+                     interface_name, ip])
+    # Deregister regardless: if the address is already gone we still want it
+    # out of the registry so cleanup doesn't keep retrying it.
+    with _NETSH_LOCK:
+        _TEMP_IPS.discard((interface_name, ip))
+    return ok
 
 
 def ip_to_subnet(ip: str) -> str:
@@ -286,29 +380,28 @@ def remove_static_route(subnet: str, gateway: str) -> bool:
 
 
 def add_secondary_ip(interface_name: str, ip: str, prefix_len: int = 24) -> bool:
-    """Add a secondary IP address to an interface using Netsh. Returns True on success."""
-    try:
-        result = subprocess.run(
-            ["netsh", "interface", "ipv4", "add", "address",
-             interface_name, ip, str(_prefix_len_to_mask(prefix_len))],
-            capture_output=True, text=True, timeout=10
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    """Add a secondary IP address to an interface using Netsh. Returns True on success.
+
+    On success the (interface, ip) pair is registered so cleanup_temp_ips()
+    can always tear it down later, even on crash/kill.
+    """
+    ok = _run_netsh(["interface", "ipv4", "add", "address",
+                     interface_name, ip, str(_prefix_len_to_mask(prefix_len))])
+    if ok:
+        with _NETSH_LOCK:
+            _TEMP_IPS.add((interface_name, ip))
+    return ok
 
 
 def remove_secondary_ip(interface_name: str, ip: str) -> bool:
     """Remove a secondary IP address from an interface. Returns True on success."""
-    try:
-        result = subprocess.run(
-            ["netsh", "interface", "ipv4", "delete", "address",
-             interface_name, ip],
-            capture_output=True, text=True, timeout=10
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    ok = _run_netsh(["interface", "ipv4", "delete", "address",
+                     interface_name, ip])
+    # Deregister regardless so cleanup doesn't keep retrying an address
+    # that is already gone.
+    with _NETSH_LOCK:
+        _TEMP_IPS.discard((interface_name, ip))
+    return ok
 
 
 def _prefix_len_to_mask(prefix_len: int) -> str:

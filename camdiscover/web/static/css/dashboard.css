@@ -477,6 +477,66 @@
 }
 
 /* ─── Subnet Zone Card ──────────────────────────────────────────────────── */
+.cam__detail-alert {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: var(--radius-sm);
+}
+.cam__detail-alert__label {
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  flex: 0 0 auto;
+}
+.cam__detail-alert__text {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.cam__evidence-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.cam__evidence-item {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+}
+.cam__evidence-item__weight {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.cam__evidence-item__weight--pos { color: var(--accent-green); }
+.cam__evidence-item__weight--neg { color: var(--error); }
+.cam__evidence-item__body {
+  min-width: 0;
+}
+.cam__evidence-item__detail {
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.cam__evidence-item__meta {
+  margin-top: 2px;
+  color: var(--text-label);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
 .cam__subnet-zone-card {
   background: var(--bg-input);
   border: 1px solid var(--border-dim);
@@ -735,6 +795,8 @@
   text-decoration: none;
 }
 .cam__viewer__btn:hover { background: rgba(99,102,241,.28); }
+.cam__viewer__btn--active { background: rgba(20,184,166,.2); color: var(--accent-teal); border-color: rgba(20,184,166,.4); }
+.cam__viewer__btn--active:hover { background: rgba(20,184,166,.32); }
 .cam__viewer__btn--setip { background: rgba(139,92,246,.15); color: #a78bfa; border-color: rgba(139,92,246,.3); }
 .cam__viewer__info {
   padding: 10px 16px;
@@ -804,3 +866,60 @@
 }
 .cam__setip-result--ok  { background: rgba(34,197,94,.12); color: #22c55e; }
 .cam__setip-result--err { background: rgba(201,64,64,.12); color: #f87171; }
+
+/* ─── Sweep Subnet Bar ───────────────────────────────────────────────────── */
+/* Hidden by default; shown only when [data-mode="sweep"] is set on .cam     */
+.cam__sweep-bar {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-mid);
+  font-size: 11px;
+}
+
+.cam[data-mode="sweep"] .cam__sweep-bar {
+  display: flex;
+}
+
+.cam__sweep-bar__label {
+  color: var(--text-label);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.cam__sweep-bar__input {
+  flex: 1;
+  max-width: 480px;
+  padding: 4px 10px;
+  background: var(--bg-input, var(--bg-row));
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+}
+.cam__sweep-bar__input:focus {
+  outline: none;
+  border-color: var(--accent, #6366f1);
+}
+.cam__sweep-bar__input::placeholder {
+  color: var(--text-muted, #4b5563);
+}
+
+.cam__sweep-bar__hint {
+  color: var(--text-label);
+  font-size: 10px;
+  opacity: .7;
+}
+.cam__sweep-bar__hint code {
+  background: rgba(99,102,241,.15);
+  color: var(--accent, #6366f1);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+}

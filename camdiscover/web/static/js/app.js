@@ -8,6 +8,10 @@
 (function() {
   'use strict';
 
+  // ─── Utilities ──────────────────────────────────────────────────────
+  const esc = (t) => String(t == null ? '' : t)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
   // ─── State ──────────────────────────────────────────────────────────
   let devices = [];
   let selectedDeviceIp = null;
@@ -34,18 +38,24 @@
   // ─── DOM refs ───────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
+  const on = (el, event, handler) => {
+    if (!el) return false;
+    el.addEventListener(event, handler);
+    return true;
+  };
 
   const app = $('#app');
   const ifaceSelect = $('#iface-select');
   const modeTabs = $$('.cam__mode-tab');
-  const scanBtn = $('#scan-btn');
+  const scanBtn  = $('#scan-btn');
+  const clearBtn = $('#clear-btn');
   const exportCsv = $('#export-csv');
   const exportJson = $('#export-json');
   const deviceCount = $('#device-count');
-  const deviceCountNum = deviceCount.querySelector('.cam__device-count__num');
+  const deviceCountNum = deviceCount ? deviceCount.querySelector('.cam__device-count__num') : null;
   const scanStatus = $('#scan-status');
-  const statusIcon = scanStatus.querySelector('.cam__status-dot__icon');
-  const statusLabel = scanStatus.querySelector('.cam__status-dot__label');
+  const statusIcon = scanStatus ? scanStatus.querySelector('.cam__status-dot__icon') : null;
+  const statusLabel = scanStatus ? scanStatus.querySelector('.cam__status-dot__label') : null;
   const progressBar = $('#progress-bar');
   const progressFill = $('#progress-fill');
   const progressText = $('#progress-text');
@@ -60,6 +70,7 @@
   const confidenceFilter = $('#confidence-filter');
   const confidenceVal = $('#confidence-val');
   const vendorFilters = $('#vendor-filters');
+  const typeFilters = $('#type-filters');
   const protocolFilters = $$('#protocol-filters input[type="checkbox"]');
   const subnetFilters = $('#subnet-filters');
   const tickerInner = $('#ticker-inner');
@@ -81,6 +92,375 @@
     bindEvents();
     connectSSE();
     await loadExistingDevices();
+    purgeSweepSubnetStorage();
+    initTriagePanel();
+    initSensorBanner();
+    initLostPanel();
+    await refreshInterfaceProfile();
+    setInterval(refreshInterfaceProfile, 15000);
+    setInterval(refreshLostDevices, 5000);
+  }
+
+  function purgeSweepSubnetStorage() {
+    // The sweep-subnets field is intentionally NOT persisted. Wipe any value
+    // a previous build may have stored so it can never silently re-inject
+    // stale targets (e.g. a 172.16.1-22.0/24 range) into future scans.
+    try { localStorage.removeItem('cam_sweep_subnets'); } catch(_) {}
+  }
+
+  // ─── Triage panel ───────────────────────────────────────────────────
+  // Self-contained: builds its own DOM + styles and polls /api/triage so
+  // the operator can see the single sequential worker's current task and
+  // the four priority queues (known scope, mismatch, lost networks,
+  // orphans) without any change to index.html / dashboard.css.
+
+  function initTriagePanel() {
+    const style = document.createElement('style');
+    style.textContent = `
+      #triage-panel{position:fixed;right:14px;bottom:54px;width:340px;max-height:60vh;
+        overflow:auto;background:#0d1117f2;border:1px solid #30363d;border-radius:8px;
+        font:11px/1.4 ui-monospace,Consolas,monospace;color:#c9d1d9;z-index:9000;
+        box-shadow:0 6px 24px #000a}
+      #triage-panel h4{margin:0;padding:8px 10px;background:#161b22;border-bottom:1px solid #30363d;
+        font-size:11px;letter-spacing:.08em;color:#58a6ff;display:flex;justify-content:space-between;cursor:pointer}
+      #triage-panel .tp-body{padding:8px 10px}
+      #triage-panel .tp-task{color:#7ee787;margin-bottom:8px;word-break:break-word}
+      #triage-panel .tp-sec{margin:6px 0 2px;color:#d29922;text-transform:uppercase;font-size:10px;letter-spacing:.06em}
+      #triage-panel .tp-row{display:flex;justify-content:space-between;gap:8px;padding:1px 0;border-bottom:1px solid #21262d}
+      #triage-panel .tp-row span:last-child{color:#8b949e;white-space:nowrap}
+      #triage-panel .tp-empty{color:#484f58}
+      #triage-panel.tp-collapsed .tp-body{display:none}
+      #triage-panel .tp-ingest-btn{background:#21262d;border:1px solid #30363d;color:#58a6ff;
+        border-radius:4px;font:10px ui-monospace,monospace;padding:1px 6px;cursor:pointer;margin-left:6px}
+      #tp-modal{position:fixed;inset:0;background:#000a;z-index:9500;display:flex;
+        align-items:center;justify-content:center}
+      #tp-modal .box{background:#0d1117;border:1px solid #30363d;border-radius:8px;
+        width:480px;max-width:92vw;padding:14px;font:12px ui-monospace,monospace;color:#c9d1d9}
+      #tp-modal h3{margin:0 0 8px;color:#58a6ff;font-size:13px}
+      #tp-modal select,#tp-modal textarea{width:100%;background:#161b22;color:#c9d1d9;
+        border:1px solid #30363d;border-radius:4px;padding:6px;font:12px ui-monospace,monospace;margin:4px 0}
+      #tp-modal textarea{height:180px;resize:vertical}
+      #tp-modal .row{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+      #tp-modal button{padding:5px 12px;border-radius:4px;border:1px solid #30363d;
+        background:#21262d;color:#c9d1d9;cursor:pointer}
+      #tp-modal button.go{background:#1f6feb;color:#fff;border-color:#1f6feb}`;
+    document.head.appendChild(style);
+
+    const el = document.createElement('div');
+    el.id = 'triage-panel';
+    el.innerHTML =
+      '<h4><span>&#9673; TRIAGE ENGINE ' +
+      '<button class="tp-ingest-btn" id="tp-ingest">+ Ingest</button></span>' +
+      '<span id="tp-toggle">&#9472;</span></h4>' +
+      '<div class="tp-body" id="tp-body"><div class="tp-empty">Idle.</div></div>';
+    document.body.appendChild(el);
+    el.querySelector('#tp-toggle').addEventListener('click', () =>
+      el.classList.toggle('tp-collapsed'));
+    el.querySelector('#tp-ingest').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openIngestModal();
+    });
+
+    setInterval(refreshTriage, 2500);
+    refreshTriage();
+  }
+
+  function openIngestModal() {
+    if (document.getElementById('tp-modal')) return;
+    const m = document.createElement('div');
+    m.id = 'tp-modal';
+    m.innerHTML =
+      '<div class="box">' +
+      '<h3>Ingest out-of-band evidence (silent / orphaned devices)</h3>' +
+      '<select id="tp-kind">' +
+      '<option value="switch_mac">Switch MAC / port table</option>' +
+      '<option value="dhcp_lease">DHCP lease list</option>' +
+      '<option value="arp">Router ARP dump</option>' +
+      '<option value="lldp">LLDP neighbor detail</option>' +
+      '<option value="snmp">SNMP sysName / sysDescr text</option>' +
+      '<option value="dns">DNS or reverse-DNS name list</option>' +
+      '<option value="nvr">NVR camera/channel list</option>' +
+      '</select>' +
+      '<textarea id="tp-text" placeholder="Paste switch MAC table, DHCP leases, arp -a, LLDP neighbor text, SNMP output, DNS names, or NVR channel list here..."></textarea>' +
+      '<div class="row">' +
+      '<button id="tp-cancel">Cancel</button>' +
+      '<button class="go" id="tp-submit">Ingest</button>' +
+      '</div></div>';
+    document.body.appendChild(m);
+    const close = () => m.remove();
+    m.addEventListener('click', (e) => { if (e.target === m) close(); });
+    document.getElementById('tp-cancel').addEventListener('click', close);
+    document.getElementById('tp-submit').addEventListener('click', async () => {
+      const kind = document.getElementById('tp-kind').value;
+      const text = document.getElementById('tp-text').value;
+      if (!text.trim()) { close(); return; }
+      try {
+        const r = await fetch('/api/triage/ingest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind, text }),
+        });
+        const j = await r.json();
+        if (j.summary) {
+          addActivityEvent('found',
+            `Ingested ${kind}: +${j.summary.orphans} orphan, ` +
+            `+${j.summary.mismatch} mismatch, +${j.summary.candidates} candidate`);
+        }
+      } catch(_) {
+        addActivityEvent('error', 'Ingest failed');
+      }
+      close();
+      refreshTriage();
+    });
+  }
+
+  async function refreshTriage() {
+    let s;
+    try {
+      const r = await fetch('/api/triage');
+      if (!r.ok) return;
+      s = await r.json();
+    } catch(_) { return; }
+
+    const rows = (arr, fmt) => arr.length
+      ? arr.map(fmt).join('')
+      : '<div class="tp-empty">none</div>';
+
+    const scope = (s.known_scopes || []).map(k =>
+      `<div class="tp-row"><span>${esc(k.cidr)} <em>(${esc(k.source)})</em></span>` +
+      `<span>${k.completed ? 'done' : (k.next_host + '/254')}</span></div>`).join('')
+      || '<div class="tp-empty">none</div>';
+
+    const mm = rows((s.mismatch || []).slice(0, 12), m =>
+      `<div class="tp-row"><span>${esc(m.ip)}</span>` +
+      `<span title="${esc(m.reason)}">${esc(m.status)}</span></div>`);
+
+    const cand = rows((s.candidates || []).slice(0, 12), c =>
+      `<div class="tp-row"><span>${esc(c.cidr)} ${c.confidence}%</span>` +
+      `<span>${esc(c.status)}</span></div>`);
+
+    const orph = rows((s.orphans || []).slice(0, 10), o =>
+      `<div class="tp-row"><span>${esc(o.ip || o.mac)}</span>` +
+      `<span>${esc(o.status)}</span></div>`);
+
+    const gwmm = rows((s.gateway_mismatch || []).slice(0, 6), g =>
+      `<div class="tp-row"><span>${esc(g.ip)}</span>` +
+      `<span title="${esc(g.reason)}" style="color:#d29922">&#8594; ${esc(g.observed_target_gateway || '?')}</span></div>`);
+
+    const mcast = rows((s.multicast_groups || []).slice(0, 6), g =>
+      `<div class="tp-row"><span>${esc(g.group)}</span>` +
+      `<span style="color:#8b949e">${esc(g.protocol_hint)} &#183; ${g.packet_count}pkt</span></div>`);
+
+    const p5 = rows((s.camera_validation || []).slice(0, 8), v => {
+      const statusColour = v.status === 'pass' ? '#7ee787'
+        : v.status === 'fail' ? '#f85149'
+        : v.status === 'validating' ? '#d29922' : '#8b949e';
+      const checks = [
+        v.onvif_ok ? 'ONVIF' : null,
+        v.rtsp_ok  ? 'RTSP'  : null,
+        v.http_ok  ? 'HTTP'  : null,
+        v.nvr_match? 'NVR'   : null,
+      ].filter(Boolean).join(' ');
+      return `<div class="tp-row"><span>${esc(v.ip)}</span>` +
+        `<span style="color:${statusColour}">${esc(v.status)}${checks ? ' ' + checks : ''}</span></div>`;
+    });
+
+    document.getElementById('tp-body').innerHTML =
+      `<div class="tp-task">${esc(s.current_task || 'Idle.')}</div>` +
+      `<div class="tp-sec">P1 Known scopes</div>${scope}` +
+      `<div class="tp-sec">P2 Mismatch (one at a time)</div>${mm}` +
+      `<div class="tp-sec">Gateway mismatch (old static config)</div>${gwmm}` +
+      `<div class="tp-sec">P3 Lost / candidate networks</div>${cand}` +
+      `<div class="tp-sec">P4 Orphans</div>${orph}` +
+      `<div class="tp-sec">P5 Camera validation (Arm 7)</div>${p5}` +
+      `<div class="tp-sec">Multicast groups (monitor only)</div>${mcast}`;
+  }
+
+  // ─── Sensor quality banner ──────────────────────────────────────────
+  // Shows adapter position quality (Wi-Fi=limited, mirror=full) above the table.
+
+  function initSensorBanner() {
+    const style = document.createElement('style');
+    style.textContent = `
+      #sensor-banner{padding:5px 12px;font:11px ui-monospace,monospace;
+        display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+        border-bottom:1px solid #21262d;margin-bottom:4px}
+      #sensor-banner.ok{background:#0d2a1a;color:#7ee787}
+      #sensor-banner.warn{background:#2b1a00;color:#d29922}
+      #sensor-banner.hidden{display:none}
+      #sensor-banner .sb-badge{font-weight:bold;font-size:10px;
+        padding:1px 6px;border-radius:3px;background:#1a3f00}
+      #sensor-banner.warn .sb-badge{background:#4a2c00}
+      #sensor-banner .sb-warnings{font-size:10px;color:#f0883e;margin-left:auto}
+      #iface-warning{background:#1a1000;border:1px solid #d29922;border-radius:4px;
+        padding:4px 10px;font:11px ui-monospace,monospace;color:#d29922;
+        margin:4px 0;display:none}`;
+    document.head.appendChild(style);
+
+    const banner = document.createElement('div');
+    banner.id = 'sensor-banner';
+    banner.className = 'hidden';
+    const tableWrap = $('#device-tbody');
+    const parent = tableWrap ? tableWrap.closest('table') || tableWrap.parentElement : null;
+    if (parent && parent.parentElement) {
+      parent.parentElement.insertBefore(banner, parent);
+    }
+
+    const warn = document.createElement('div');
+    warn.id = 'iface-warning';
+    if (parent && parent.parentElement) {
+      parent.parentElement.insertBefore(warn, parent);
+    }
+  }
+
+  async function refreshInterfaceProfile() {
+    try {
+      const r = await fetch('/api/interface-profile');
+      if (!r.ok) return;
+      const p = await r.json();
+
+      // Sensor banner
+      const banner = document.getElementById('sensor-banner');
+      if (banner && p.sensor) {
+        const s = p.sensor;
+        const cls = s.colour === 'ok' ? 'ok' : 'warn';
+        banner.className = cls;
+        banner.innerHTML =
+          `<span class="sb-badge">Sensor: ${esc(s.quality)}</span>` +
+          `<span>${esc(s.label)}</span>` +
+          `<span>${esc(s.note)}</span>` +
+          (p.temp_ips && p.temp_ips.length
+            ? `<span class="sb-warnings">&#9888; Temp IPs: ${p.temp_ips.join(', ')}</span>` : '');
+      }
+
+      // Interface warnings
+      const warnEl = document.getElementById('iface-warning');
+      if (warnEl) {
+        if (p.warnings && p.warnings.length) {
+          warnEl.style.display = '';
+          warnEl.innerHTML = p.warnings.map(w => `&#9888; ${esc(w)}`).join('<br>');
+        } else {
+          warnEl.style.display = 'none';
+        }
+      }
+    } catch(_) {}
+  }
+
+  // ─── Lost / Mismatched Devices panel ───────────────────────────────
+  // Separate floating panel showing gateway-mismatch, mismatch, and orphan
+  // queues — devices that are "lost but communicating".
+
+  function initLostPanel() {
+    const style = document.createElement('style');
+    style.textContent = `
+      #lost-panel{position:fixed;left:14px;bottom:54px;width:360px;max-height:55vh;
+        overflow:auto;background:#0d1117f2;border:1px solid #30363d;border-radius:8px;
+        font:11px/1.4 ui-monospace,Consolas,monospace;color:#c9d1d9;z-index:8900;
+        box-shadow:0 6px 24px #000a}
+      #lost-panel h4{margin:0;padding:8px 10px;background:#161b22;border-bottom:1px solid #30363d;
+        font-size:11px;letter-spacing:.08em;color:#f0883e;display:flex;justify-content:space-between;cursor:pointer}
+      #lost-panel .lp-body{padding:8px 10px}
+      #lost-panel .lp-sec{margin:6px 0 2px;color:#d29922;text-transform:uppercase;font-size:10px;letter-spacing:.06em}
+      #lost-panel .lp-row{padding:3px 0;border-bottom:1px solid #21262d}
+      #lost-panel .lp-row .ip{color:#58a6ff;font-weight:bold}
+      #lost-panel .lp-row .badge{display:inline-block;font-size:9px;padding:0 4px;border-radius:2px;
+        background:#4a1010;color:#f85149;margin-left:4px}
+      #lost-panel .lp-row .badge.gw{background:#2b2000;color:#d29922}
+      #lost-panel .lp-row .badge.orphan{background:#0d2040;color:#58a6ff}
+      #lost-panel .lp-row .detail{color:#8b949e;font-size:10px;margin-top:1px}
+      #lost-panel .lp-row .next{color:#3fb950;font-size:10px}
+      #lost-panel .lp-row .warn-reset{color:#f85149;font-weight:bold;font-size:10px}
+      #lost-panel .lp-empty{color:#484f58}
+      #lost-panel.lp-collapsed .lp-body{display:none}
+      #lost-panel .lp-total{margin-left:6px;font-size:10px;background:#21262d;
+        border-radius:3px;padding:0 5px;color:#f0883e}`;
+    document.head.appendChild(style);
+
+    const el = document.createElement('div');
+    el.id = 'lost-panel';
+    el.innerHTML =
+      '<h4><span>&#9888; LOST / MISMATCHED <span id="lp-total" class="lp-total">0</span></span>' +
+      '<span id="lp-toggle">&#9472;</span></h4>' +
+      '<div class="lp-body" id="lp-body"><div class="lp-empty">No lost devices detected.</div></div>';
+    document.body.appendChild(el);
+    el.querySelector('#lp-toggle').addEventListener('click', () =>
+      el.classList.toggle('lp-collapsed'));
+  }
+
+  async function refreshLostDevices() {
+    try {
+      const r = await fetch('/api/lost-devices');
+      if (!r.ok) return;
+      const data = await r.json();
+
+      const total = data.total || 0;
+      const tot = document.getElementById('lp-total');
+      if (tot) tot.textContent = total;
+
+      const body = document.getElementById('lp-body');
+      if (!body) return;
+      if (total === 0) {
+        body.innerHTML = '<div class="lp-empty">No lost devices detected.</div>';
+        return;
+      }
+
+      let html = '';
+
+      // Gateway mismatches — most urgent
+      if (data.gateway_mismatches && data.gateway_mismatches.length) {
+        html += '<div class="lp-sec">Gateway mismatch (old static config)</div>';
+        for (const g of data.gateway_mismatches.slice(0, 8)) {
+          html +=
+            `<div class="lp-row">` +
+            `<span class="ip">${esc(g.ip)}</span>` +
+            `<span class="badge gw">GW MISMATCH</span>` +
+            (g.warn_reset ? `<span class="warn-reset"> &#9888; do not reset</span>` : '') +
+            `<div class="detail">` +
+            (g.vendor ? esc(g.vendor) + ' &bull; ' : '') +
+            `Targeting: <strong>${esc(g.observed_target_gateway || '?')}</strong>` +
+            (g.suspected_old_subnet ? ` &rarr; ${esc(g.suspected_old_subnet)}` : '') +
+            `</div>` +
+            `<div class="detail">${esc(g.reason || '')}</div>` +
+            (g.next_action ? `<div class="next">&#8594; ${esc(g.next_action)}</div>` : '') +
+            `</div>`;
+        }
+      }
+
+      // Subnet mismatches
+      if (data.mismatches && data.mismatches.length) {
+        html += '<div class="lp-sec">Subnet mismatch (one at a time)</div>';
+        for (const m of data.mismatches.slice(0, 8)) {
+          html +=
+            `<div class="lp-row">` +
+            `<span class="ip">${esc(m.ip)}</span>` +
+            `<span class="badge">${esc(m.status || 'observed')}</span>` +
+            (m.warn_reset ? `<span class="warn-reset"> &#9888; do not reset</span>` : '') +
+            `<div class="detail">` +
+            (m.vendor ? esc(m.vendor) + ' &bull; ' : '') +
+            esc(m.reason || '') +
+            `</div>` +
+            `</div>`;
+        }
+      }
+
+      // Orphans
+      if (data.orphans && data.orphans.length) {
+        html += '<div class="lp-sec">Orphans (switch/NVR/DHCP/passive only)</div>';
+        for (const o of data.orphans.slice(0, 10)) {
+          const label = o.ip || o.mac || 'unknown';
+          html +=
+            `<div class="lp-row">` +
+            `<span class="ip">${esc(label)}</span>` +
+            `<span class="badge orphan">${esc(o.status || 'orphan')}</span>` +
+            `<div class="detail">${esc(o.reason || '')}</div>` +
+            (o.camera_confidence > 0
+              ? `<div class="next">Camera confidence: ${o.camera_confidence}%</div>` : '') +
+            `</div>`;
+        }
+      }
+
+      body.innerHTML = html || '<div class="lp-empty">No lost devices detected.</div>';
+    } catch(_) {}
   }
 
   function detectElectron() {
@@ -206,6 +586,13 @@
         renderCapturePosition();
         break;
 
+      case 'devices_cleared':
+        devices = [];
+        renderTable();
+        updateStats();
+        addActivityEvent('found', 'Device list cleared');
+        break;
+
       case 'error':
         addActivityEvent('error', data.message);
         break;
@@ -216,46 +603,67 @@
   function bindEvents() {
     // Mode tabs
     modeTabs.forEach(tab => {
-      tab.addEventListener('click', () => {
+      on(tab, 'click', () => {
         modeTabs.forEach(t => t.classList.remove('cam__mode-tab--active'));
         tab.classList.add('cam__mode-tab--active');
         currentMode = tab.dataset.mode;
-        app.dataset.mode = currentMode;
+        if (app) app.dataset.mode = currentMode;
       });
     });
 
     // Scan button
-    scanBtn.addEventListener('click', () => {
+    on(scanBtn, 'click', () => {
       if (isScanning) stopScan();
       else startScan();
     });
 
+    // Clear button — wipes device list (only works when not scanning)
+    on(clearBtn, 'click', async () => {
+      if (isScanning) {
+        addActivityEvent('error', 'Stop the scan before clearing results');
+        return;
+      }
+      if (!confirm('Clear all discovered devices?')) return;
+      try {
+        const resp = await fetch('/api/devices/clear', { method: 'POST' });
+        if (!resp.ok) {
+          const err = await resp.json();
+          addActivityEvent('error', err.error || 'Clear failed');
+        }
+      } catch(e) {
+        addActivityEvent('error', 'Failed to clear devices');
+      }
+    });
+
     // Export
-    exportCsv.addEventListener('click', () => window.open('/api/export/csv', '_blank'));
-    exportJson.addEventListener('click', () => window.open('/api/export/json', '_blank'));
+    on(exportCsv, 'click', () => window.open('/api/export/csv', '_blank'));
+    on(exportJson, 'click', () => window.open('/api/export/json', '_blank'));
 
     // Search
-    searchInput.addEventListener('input', debounce(renderTable, 200));
+    on(searchInput, 'input', debounce(renderTable, 200));
 
     // Sidebar collapse
-    sidebarCollapse.addEventListener('click', () => {
+    on(sidebarCollapse, 'click', () => {
+      if (!sidebarEl || !sidebarCollapse) return;
       sidebarEl.classList.toggle('cam__sidebar--collapsed');
       const isCollapsed = sidebarEl.classList.contains('cam__sidebar--collapsed');
       sidebarCollapse.textContent = isCollapsed ? '\u25B6' : '\u25C0';
     });
 
     // Confidence filter
-    confidenceFilter.addEventListener('input', () => {
-      confidenceVal.textContent = confidenceFilter.value + '%+';
+    on(confidenceFilter, 'input', () => {
+      if (confidenceVal && confidenceFilter) {
+        confidenceVal.textContent = confidenceFilter.value + '%+';
+      }
       renderTable();
     });
 
     // Protocol filters
-    protocolFilters.forEach(cb => cb.addEventListener('change', renderTable));
+    protocolFilters.forEach(cb => on(cb, 'change', renderTable));
 
     // Sort
     $$('.cam__th[data-sort]').forEach(th => {
-      th.addEventListener('click', () => {
+      on(th, 'click', () => {
         const field = th.dataset.sort;
         if (sortField === field) {
           sortDir = sortDir === 'asc' ? 'desc' : 'asc';
@@ -268,8 +676,8 @@
     });
 
     // Detail panel close
-    detailClose.addEventListener('click', closeDetail);
-    document.addEventListener('keydown', (e) => {
+    on(detailClose, 'click', closeDetail);
+    on(document, 'keydown', (e) => {
       if (e.key === 'Escape') {
         closeDetail();
         closeAnyDialog();
@@ -277,23 +685,23 @@
     });
 
     // Expand/collapse all
-    expandAllBtn.addEventListener('click', () => {
+    on(expandAllBtn, 'click', () => {
       $$('.cam__expand-btn').forEach(b => b.classList.add('cam__expand-btn--open'));
       $$('.cam__detail-row').forEach(r => r.style.display = '');
     });
-    collapseAllBtn.addEventListener('click', () => {
+    on(collapseAllBtn, 'click', () => {
       $$('.cam__expand-btn').forEach(b => b.classList.remove('cam__expand-btn--open'));
       $$('.cam__detail-row').forEach(r => r.style.display = 'none');
     });
 
     // Capture position click
-    capturePosEl.addEventListener('click', showCapturePositionDialog);
+    on(capturePosEl, 'click', showCapturePositionDialog);
 
     // Add subnet button
-    addSubnetBtn.addEventListener('click', showAddSubnetDialog);
+    on(addSubnetBtn, 'click', showAddSubnetDialog);
 
     // Subnet watch toggle
-    watchBtn.addEventListener('click', toggleWatch);
+    on(watchBtn, 'click', toggleWatch);
   }
 
   async function toggleWatch() {
@@ -331,9 +739,25 @@
 
   async function startScan() {
     setScanning(true);
-    devices = [];
-    renderTable();
-    updateStats();
+    // Do NOT clear devices — preserve previously found cameras across mode switches.
+    // Use the explicit Clear button to reset.
+
+    // Collect sweep subnets (if any) from the sweep bar input
+    let subnets = null;
+    if (currentMode === 'sweep') {
+      const sweepInput = document.getElementById('sweep-subnets');
+      const raw = sweepInput ? sweepInput.value.trim() : '';
+      if (raw) {
+        // Split on commas so user can enter multiple ranges/subnets.
+        // Use exactly what is in the box right now — nothing is persisted
+        // or restored, so a scan only ever targets what the operator
+        // explicitly typed for THIS scan.
+        subnets = raw.split(',').map(s => s.trim()).filter(Boolean);
+        addActivityEvent('found', `Sweep targets: ${subnets.join(', ')}`);
+      } else {
+        addActivityEvent('found', 'Sweep: auto-detecting subnets + built-in camera list');
+      }
+    }
 
     try {
       const resp = await fetch('/api/scan', {
@@ -342,6 +766,7 @@
         body: JSON.stringify({
           mode: currentMode,
           interface: ifaceSelect.value,
+          subnets,       // null = auto-detect; array = explicit targets
         }),
       });
       if (!resp.ok) {
@@ -365,19 +790,23 @@
   function setScanning(state) {
     isScanning = state;
     if (state) {
-      scanBtn.className = 'cam__scan-btn cam__scan-btn--stop';
-      scanBtn.innerHTML = '<span class="cam__scan-btn__icon">\u25A0</span> Stop';
-      statusIcon.className = 'cam__status-dot__icon cam__status-dot__icon--active';
-      statusLabel.textContent = 'Scanning';
-      progressBar.style.display = '';
+      if (scanBtn) {
+        scanBtn.className = 'cam__scan-btn cam__scan-btn--stop';
+        scanBtn.innerHTML = '<span class="cam__scan-btn__icon">\u25A0</span> Stop';
+      }
+      if (statusIcon) statusIcon.className = 'cam__status-dot__icon cam__status-dot__icon--active';
+      if (statusLabel) statusLabel.textContent = 'Scanning';
+      if (progressBar) progressBar.style.display = '';
       scanStartTime = Date.now();
       scanTimer = setInterval(updateScanTime, 1000);
     } else {
-      scanBtn.className = 'cam__scan-btn cam__scan-btn--start';
-      scanBtn.innerHTML = '<span class="cam__scan-btn__icon">\u25B6</span> Start Scan';
-      statusIcon.className = 'cam__status-dot__icon cam__status-dot__icon--idle';
-      statusLabel.textContent = 'Idle';
-      progressBar.style.display = 'none';
+      if (scanBtn) {
+        scanBtn.className = 'cam__scan-btn cam__scan-btn--start';
+        scanBtn.innerHTML = '<span class="cam__scan-btn__icon">\u25B6</span> Start Scan';
+      }
+      if (statusIcon) statusIcon.className = 'cam__status-dot__icon cam__status-dot__icon--idle';
+      if (statusLabel) statusLabel.textContent = 'Idle';
+      if (progressBar) progressBar.style.display = 'none';
       if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
     }
   }
@@ -387,15 +816,15 @@
     const elapsed = Math.floor((Date.now() - scanStartTime) / 1000);
     const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
     const secs = String(elapsed % 60).padStart(2, '0');
-    scanTime.textContent = `${mins}:${secs}`;
+    if (scanTime) scanTime.textContent = `${mins}:${secs}`;
   }
 
   function updateProgress(data) {
-    if (data.total > 0) {
+    if (progressFill && data.total > 0) {
       const pct = Math.round((data.current / data.total) * 100);
       progressFill.style.width = pct + '%';
     }
-    progressText.textContent = data.message || '';
+    if (progressText) progressText.textContent = data.message || '';
   }
 
   // ─── Rendering ──────────────────────────────────────────────────────
@@ -428,16 +857,30 @@
       const confidenceHtml = renderConfidence(device.confidence);
       const actionLinks = renderActionLinks(device);
 
+      // Classification badges
+      const dcBadge = device.device_type && device.device_type !== 'unknown'
+        ? `<span style="font-size:9px;padding:0 3px;border-radius:2px;background:#21262d;color:#8b949e;margin-left:3px">${esc(device.device_type.replace(/_/g, ' '))}</span>`
+        : '';
+      const warnBadge = device.warn_reset
+        ? `<span style="font-size:9px;padding:0 3px;border-radius:2px;background:#4a1010;color:#f85149;margin-left:3px" title="Do not reset">&#9888; no-reset</span>`
+        : '';
+      const apipaBadge = device.apipa_seen
+        ? `<span style="font-size:9px;padding:0 3px;border-radius:2px;background:#2b1a00;color:#d29922;margin-left:3px" title="${esc('APIPA \u2014 no DHCP/isolated segment')}">APIPA</span>`
+        : '';
+      const gwMismatchBadge = device.suspected_old_gateway
+        ? `<span style="font-size:9px;padding:0 3px;border-radius:2px;background:#2b2000;color:#d29922;margin-left:3px" title="Old gateway: ${esc(device.suspected_old_gateway)}">GW?</span>`
+        : '';
+
       html += `
         <tr class="cam__tr ${isSelected ? 'cam__tr--selected' : ''} cam__tr--new"
             data-ip="${esc(device.ip)}" onclick="window._selectDevice('${esc(device.ip)}')">
           <td class="cam__td">
             <button class="cam__expand-btn" onclick="event.stopPropagation(); window._toggleExpand('${esc(device.ip)}')">&#9654;</button>
           </td>
-          <td class="cam__td cam__td--ip">${esc(device.ip)}</td>
+          <td class="cam__td cam__td--ip">${esc(device.ip)}${apipaBadge}${gwMismatchBadge}</td>
           <td class="cam__td cam__td--mac">${esc(device.mac || '\u2014')}</td>
           <td class="cam__td cam__td--vendor">
-            <span class="cam__vendor-badge ${vendorClass}">${esc(device.vendor)}</span>
+            <span class="cam__vendor-badge ${vendorClass}">${esc(device.vendor)}</span>${dcBadge}${warnBadge}
           </td>
           <td class="cam__td">${esc(device.model || '\u2014')}</td>
           <td class="cam__td cam__td--ports">${portTags}</td>
@@ -457,14 +900,17 @@
     });
 
     tableBody.innerHTML = html;
-    deviceCountNum.textContent = devices.length;
+    if (deviceCountNum) deviceCountNum.textContent = devices.length;
   }
 
   function renderInlineDetail(device) {
+    const evidence = Array.isArray(device.evidence) ? device.evidence.slice().sort((a, b) => (b.weight || 0) - (a.weight || 0)) : [];
     const fields = [
-      ['IP Address', device.ip],
+      ['IP Address', device.ip + (device.apipa_seen ? ' <span style="color:#d29922;font-size:10px">&#9888; APIPA</span>' : '')],
       ['MAC Address', device.mac || '\u2014'],
       ['Vendor', device.vendor],
+      ['Device Type', device.device_type || device.device_class || 'unknown'],
+      ['Type Confidence', `${device.device_type_confidence != null ? device.device_type_confidence : 0}%`],
       ['Model', device.model || '\u2014'],
       ['Hostname', device.hostname || '\u2014'],
       ['Subnet', device.subnet || '\u2014'],
@@ -472,9 +918,14 @@
       ['ONVIF URL', device.onvif_url ? `<a href="${esc(device.onvif_url)}" target="_blank">${esc(device.onvif_url)}</a>` : '\u2014'],
       ['RTSP URL', device.rtsp_url ? `<a href="${esc(device.rtsp_url)}" target="_blank">${esc(device.rtsp_url)}</a>` : '\u2014'],
       ['Web URL', device.web_url ? `<a href="${esc(device.web_url)}" target="_blank">${esc(device.web_url)}</a>` : '\u2014'],
-      ['Confidence', device.confidence + '%'],
+      ...(device.suspected_old_gateway ? [['Old Gateway', `<span style="color:#d29922">&#9888; ${esc(device.suspected_old_gateway)}</span> \u2014 likely old static config`]] : []),
+      ...(device.warn_reset ? [['Warning', '<span style="color:#f85149;font-weight:bold">&#9888; Do not factory-reset without checking both ends</span>']] : []),
+      ...(device.notes ? [['Notes', esc(device.notes)]] : []),
+      ['Camera Confidence', device.confidence + '%'],
+      ['Fingerprint Score', (device.fingerprint_score != null ? device.fingerprint_score + '%' : '\u2014')],
       ['DPI Score', (device.dpi_score != null ? device.dpi_score + '%' : '\u2014')],
       ['Discovery', (device.discovery_methods || []).join(', ')],
+      ['PoE / Link State', device.poe_state || '\u2014'],
       ['Last Seen', device.last_seen ? new Date(device.last_seen).toLocaleTimeString() : '\u2014'],
     ];
 
@@ -499,6 +950,30 @@
             <span class="cam__dpi-stage-item__icon cam__dpi-stage-item__icon--${r.status}"></span>
             <span class="cam__dpi-stage-item__label">${DPI_LABELS[stage] || stage}</span>
             <span class="cam__dpi-stage-item__detail">${esc(r.detail || '')}</span>
+          </div>`;
+      });
+      html += '</div>';
+    }
+
+    if (device.subnet_mismatch) {
+      html += `
+        <div class="cam__detail-alert">
+          <span class="cam__detail-alert__label">Subnet mismatch</span>
+          <span class="cam__detail-alert__text">${esc(device.subnet_mismatch)}</span>
+        </div>`;
+    }
+
+    if (evidence.length > 0) {
+      html += '<div class="cam__evidence-list">';
+      evidence.forEach(ev => {
+        const weightClass = (ev.weight || 0) > 0 ? 'cam__evidence-item__weight--pos' : ((ev.weight || 0) < 0 ? 'cam__evidence-item__weight--neg' : '');
+        html += `
+          <div class="cam__evidence-item">
+            <span class="cam__evidence-item__weight ${weightClass}">${ev.weight > 0 ? '+' : ''}${ev.weight || 0}</span>
+            <div class="cam__evidence-item__body">
+              <div class="cam__evidence-item__detail">${esc(ev.detail || ev.kind || 'Evidence')}</div>
+              <div class="cam__evidence-item__meta">${esc(ev.source || 'signal')}</div>
+            </div>
           </div>`;
       });
       html += '</div>';
@@ -558,10 +1033,12 @@
 
   function renderActionLinks(device) {
     let html = '<div class="cam__action-links">';
-    // View camera (snapshot / RTSP)
-    html += `<a class="cam__action-link cam__action-link--view" title="View camera" onclick="event.preventDefault(); event.stopPropagation(); window._viewCamera('${esc(device.ip)}')">&#128247;</a>`;
-    // Change IP
-    html += `<a class="cam__action-link cam__action-link--setip" title="Change IP address" onclick="event.preventDefault(); event.stopPropagation(); window._showSetIPDialog('${esc(device.ip)}')">&#9998;</a>`;
+    const deviceType = device.device_type || device.device_class || 'unknown';
+    const cameraish = ['camera', 'nvr'].includes(deviceType) || device.confidence >= 40;
+    if (cameraish) {
+      html += `<a class="cam__action-link cam__action-link--view" title="View camera" onclick="event.preventDefault(); event.stopPropagation(); window._viewCamera('${esc(device.ip)}')">&#128247;</a>`;
+      html += `<a class="cam__action-link cam__action-link--setip" title="Change IP address" onclick="event.preventDefault(); event.stopPropagation(); window._showSetIPDialog('${esc(device.ip)}')">&#9998;</a>`;
+    }
     if (device.web_url) {
       html += `<a class="cam__action-link cam__action-link--web" href="${esc(device.web_url)}" target="_blank" title="Open Web UI">&#127760;</a>`;
     }
@@ -606,6 +1083,11 @@
       if (cb.checked) activeVendors.push(cb.value);
     });
 
+    const activeTypes = [];
+    typeFilters.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      if (cb.checked) activeTypes.push(cb.value);
+    });
+
     const activeSubnets = [];
     subnetFilters.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       if (cb.checked) activeSubnets.push(cb.value);
@@ -613,7 +1095,7 @@
 
     return devices.filter(d => {
       if (query) {
-        const haystack = `${d.ip} ${d.mac} ${d.vendor} ${d.model} ${d.hostname} ${d.subnet_zone || ''}`.toLowerCase();
+        const haystack = `${d.ip} ${d.mac} ${d.vendor} ${d.model} ${d.hostname} ${d.subnet_zone || ''} ${d.device_type || d.device_class || ''}`.toLowerCase();
         if (!haystack.includes(query)) return false;
       }
       if (d.confidence < minConfidence) return false;
@@ -624,6 +1106,10 @@
       }
       if (activeVendors.length > 0) {
         if (!activeVendors.some(v => d.vendor === v)) return false;
+      }
+      if (activeTypes.length > 0) {
+        const dtype = d.device_type || d.device_class || 'unknown';
+        if (!activeTypes.includes(dtype)) return false;
       }
       if (activeSubnets.length > 0) {
         if (!activeSubnets.some(s => d.subnet === s)) return false;
@@ -654,18 +1140,34 @@
   }
 
   // ─── Detail panel ───────────────────────────────────────────────────
-  function selectDevice(ip) {
+  async function selectDevice(ip) {
     selectedDeviceIp = ip;
     const device = devices.find(d => d.ip === ip);
     if (!device) return;
 
     detailTitle.textContent = device.ip;
-    detailBody.innerHTML = renderDetailPanelContent(device);
+    detailBody.innerHTML = renderDetailPanelContent(device, null);
     detailPanel.classList.add('cam__detail-panel--open');
 
     $$('.cam__tr').forEach(tr => tr.classList.remove('cam__tr--selected'));
     const row = document.querySelector(`.cam__tr[data-ip="${ip}"]`);
     if (row) row.classList.add('cam__tr--selected');
+
+    // Fetch the Arm-8 "next safe action" asynchronously and inject it
+    // without blocking the panel opening.
+    try {
+      const r = await fetch(`/api/devices/${encodeURIComponent(ip)}/next-action`);
+      if (r.ok) {
+        const na = await r.json();
+        const el = document.getElementById('cam-next-action');
+        if (el && na.action) {
+          el.innerHTML =
+            `<span style="color:#7ee787;font-weight:bold">&#8594; Next: </span>` +
+            esc(na.action);
+          el.style.display = '';
+        }
+      }
+    } catch(_) {}
   }
 
   function closeDetail() {
@@ -677,15 +1179,37 @@
   function renderDetailPanelContent(device) {
     const sections = [];
 
+    // Arm-8 explainer block \u2014 content injected asynchronously after fetch
+    const warnBlock = device.warn_reset
+      ? `<div style="background:#2a0d0d;border:1px solid #f85149;border-radius:4px;padding:5px 10px;margin-bottom:6px;font-size:11px;color:#f85149">` +
+        `&#9888; <strong>Do not factory-reset</strong> \u2014 this device may be a ${esc(device.device_class || 'critical')} device. Confirm both ends are accessible first.</div>`
+      : '';
+    const apipaBlock = device.apipa_seen
+      ? `<div style="background:#2b1a00;border:1px solid #d29922;border-radius:4px;padding:5px 10px;margin-bottom:6px;font-size:11px;color:#d29922">` +
+        `&#9888; APIPA address (169.254.x.x) detected \u2014 likely no DHCP response or isolated segment.</div>`
+      : '';
+    const gwBlock = device.suspected_old_gateway
+      ? `<div style="background:#1a1000;border:1px solid #d29922;border-radius:4px;padding:5px 10px;margin-bottom:6px;font-size:11px;color:#d29922">` +
+        `&#8594; Old gateway hint: <strong>${esc(device.suspected_old_gateway)}</strong> \u2014 device may have a static config pointing to its previous subnet.</div>`
+      : '';
+    const nextActionEl =
+      `<div id="cam-next-action" style="background:#0d2a1a;border:1px solid #3fb950;border-radius:4px;padding:5px 10px;margin-bottom:8px;font-size:11px;color:#c9d1d9;display:none"></div>`;
+
+    // Prefix the rendered content with the alert blocks
+    const headerHtml = warnBlock + apipaBlock + gwBlock + nextActionEl;
+
     sections.push({
       title: 'Identity',
       fields: [
-        ['IP Address', device.ip],
+        ['IP Address', device.ip + (device.apipa_seen ? ' <span style="color:#d29922;font-size:10px">APIPA</span>' : '')],
         ['MAC Address', device.mac || '\u2014'],
         ['Vendor', device.vendor],
+        ['Device Type', device.device_type || device.device_class || 'unknown'],
+        ['Type Confidence', `${device.device_type_confidence != null ? device.device_type_confidence : 0}%`],
         ['Model', device.model || '\u2014'],
         ['Hostname', device.hostname || '\u2014'],
         ['Firmware', device.firmware || '\u2014'],
+        ...(device.notes ? [['Notes', esc(device.notes)]] : []),
       ]
     });
 
@@ -695,8 +1219,10 @@
         ['Subnet', device.subnet || '\u2014'],
         ['Subnet Zone', device.subnet_zone || '\u2014'],
         ['Open Ports', (device.open_ports || []).join(', ') || '\u2014'],
+        ['PoE / Link State', device.poe_state || '\u2014'],
         ['Discovery', (device.discovery_methods || []).join(', ')],
         ['Last Seen', device.last_seen ? new Date(device.last_seen).toLocaleString() : '\u2014'],
+        ...(device.suspected_old_gateway ? [['Old Gateway', esc(device.suspected_old_gateway)]] : []),
       ]
     });
 
@@ -726,12 +1252,12 @@
     sections.push({
       title: 'Fingerprint',
       fields: [
-        ['Confidence', `${device.confidence}%`],
+        ['Camera Confidence', `${device.confidence}%`],
         ['Vendor Match', device.vendor],
       ]
     });
 
-    let html = '';
+    let html = headerHtml;
     sections.forEach(s => {
       html += `<div class="cam__detail-section">
         <div class="cam__detail-section-title">${s.title}</div>
@@ -755,7 +1281,7 @@
   // ─── Stats & filters ────────────────────────────────────────────────
   function updateStats() {
     const total = devices.length;
-    const cameras = devices.filter(d => d.confidence >= 40).length;
+    const cameras = devices.filter(d => (d.device_type || d.device_class) === 'camera' || d.confidence >= 40).length;
     const onvif = devices.filter(d => d.onvif_status === 'found').length;
     const rtsp = devices.filter(d => d.rtsp_status === 'found').length;
 
@@ -779,6 +1305,7 @@
     $('#stat-subnet-zones').textContent = subnetZones.length;
 
     updateVendorFilters();
+    updateTypeFilters();
     updateSubnetFilters();
     updateProtocolCounts();
   }
@@ -801,6 +1328,29 @@
     });
     vendorFilters.innerHTML = html;
     vendorFilters.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.addEventListener('change', renderTable));
+  }
+
+  function updateTypeFilters() {
+    const counts = {};
+    devices.forEach(d => {
+      const dtype = d.device_type || d.device_class || 'unknown';
+      counts[dtype] = (counts[dtype] || 0) + 1;
+    });
+
+    const existing = new Set();
+    typeFilters.querySelectorAll('input[type="checkbox"]').forEach(cb => existing.add(cb.value));
+
+    let html = '';
+    Object.entries(counts).sort((a, b) => b[1] - a[1]).forEach(([dtype, count]) => {
+      const checked = existing.has(dtype) ? 'checked' : (existing.size === 0 ? 'checked' : '');
+      html += `
+        <label class="cam__filter-item">
+          <input type="checkbox" value="${esc(dtype)}" ${checked}> ${esc(dtype.replace(/_/g, ' '))}
+          <span class="cam__filter-count">${count}</span>
+        </label>`;
+    });
+    typeFilters.innerHTML = html;
+    typeFilters.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.addEventListener('change', renderTable));
   }
 
   function updateSubnetFilters() {
@@ -1049,29 +1599,40 @@
     } catch(e) { /* ignore */ }
   };
 
-  // ─── Camera Viewer ──────────────────────────────────────────────────
-  window._viewCamera = function(ip) {
+  // ─── Camera Viewer ──────────────────────────────────────────────────────
+  window._viewCamera = async function(ip) {
     const device = devices.find(d => d.ip === ip) || { ip };
-    const snapshotUrl = `/api/devices/${encodeURIComponent(ip)}/snapshot`;
 
-    const html = `<div class="cam__viewer-overlay" id="viewer-overlay" onclick="if(event.target===this)this.remove()">
+    // Load saved credentials
+    let savedUser = 'admin', savedPass = '';
+    try {
+      const credsResp = await fetch(`/api/devices/${encodeURIComponent(ip)}/credentials`);
+      if (credsResp.ok) {
+        const creds = await credsResp.json();
+        savedUser = creds.username || 'admin';
+        savedPass = creds.password || '';
+      }
+    } catch(e) { /* use defaults */ }
+
+    const html = `<div class="cam__viewer-overlay" id="viewer-overlay" onclick="if(event.target===this)window._closeViewer()">
       <div class="cam__viewer">
         <div class="cam__viewer__header">
           <span class="cam__viewer__title">&#128247; ${esc(ip)} &mdash; ${esc(device.vendor || 'Camera')}</span>
-          <button class="cam__viewer__close" onclick="document.getElementById('viewer-overlay').remove()">&times;</button>
+          <button class="cam__viewer__close" onclick="window._closeViewer()">&times;</button>
         </div>
         <div class="cam__viewer__snapshot-wrap" id="viewer-snap-wrap">
-          <img id="viewer-img" class="cam__viewer__img" src="" alt="Loading snapshot...">
+          <img id="viewer-img" class="cam__viewer__img" src="" alt="Loading...">
           <div class="cam__viewer__snap-error" id="viewer-snap-error" style="display:none">
-            No snapshot available — camera may require authentication or use RTSP only.
+            No image available — check credentials or camera may use RTSP only.
           </div>
         </div>
         <div class="cam__viewer__controls">
-          <button class="cam__viewer__btn" onclick="window._refreshSnapshot('${esc(ip)}')">&#8635; Snapshot</button>
-          ${device.rtsp_url ? `<button class="cam__viewer__btn" onclick="navigator.clipboard.writeText('${esc(device.rtsp_url)}').then(()=>addActivityEvent('found','RTSP copied'))">&#9654; Copy RTSP</button>` : ''}
+          <button class="cam__viewer__btn cam__viewer__btn--active" id="viewer-btn-snap" onclick="window._setViewerMode('${esc(ip)}','snap')">&#9634; Snapshot</button>
+          <button class="cam__viewer__btn" id="viewer-btn-live" onclick="window._setViewerMode('${esc(ip)}','live')">&#9654; Live</button>
+          ${device.rtsp_url ? `<button class="cam__viewer__btn" onclick="navigator.clipboard.writeText('${esc(device.rtsp_url)}').then(()=>addActivityEvent('found','RTSP copied'))">&#128203; Copy RTSP</button>` : ''}
           ${device.web_url ? `<a class="cam__viewer__btn" href="${esc(device.web_url)}" target="_blank">&#127760; Web UI</a>` : ''}
           <button class="cam__viewer__btn" id="viewer-onvif-btn-${esc(ip)}" onclick="window._queryOnvifInfo('${esc(ip)}')">&#9881; ONVIF Info</button>
-          <button class="cam__viewer__btn cam__viewer__btn--setip" onclick="document.getElementById('viewer-overlay').remove(); window._showSetIPDialog('${esc(ip)}')">&#9998; Change IP</button>
+          <button class="cam__viewer__btn cam__viewer__btn--setip" onclick="window._closeViewer();window._showSetIPDialog('${esc(ip)}')">&#9998; Change IP</button>
         </div>
         <div class="cam__viewer__info" id="viewer-info-${esc(ip)}">
           ${device.rtsp_url ? `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">RTSP</span><code>${esc(device.rtsp_url)}</code></div>` : ''}
@@ -1081,21 +1642,80 @@
           ${device.firmware ? `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">FW</span><code>${esc(device.firmware)}</code></div>` : ''}
         </div>
         <div class="cam__viewer__auth">
-          <span class="cam__viewer__auth-label">Auth (for snapshot)</span>
-          <input type="text" id="viewer-user" placeholder="username" value="admin" class="cam__viewer__auth-input">
-          <input type="password" id="viewer-pass" placeholder="password" class="cam__viewer__auth-input">
-          <button class="cam__viewer__btn" onclick="window._refreshSnapshot('${esc(ip)}')">Load</button>
+          <span class="cam__viewer__auth-label">Credentials</span>
+          <input type="text"     id="viewer-user" placeholder="username" value="${esc(savedUser)}" class="cam__viewer__auth-input">
+          <input type="password" id="viewer-pass" placeholder="password" value="${esc(savedPass)}" class="cam__viewer__auth-input">
+          <button class="cam__viewer__btn" onclick="window._saveAndLoad('${esc(ip)}')">&#128190; Save &amp; Load</button>
+          <button class="cam__viewer__btn" onclick="window._refreshSnapshot('${esc(ip)}')">&#8635; Snap</button>
         </div>
       </div>
     </div>`;
 
     closeAnyDialog();
     document.body.insertAdjacentHTML('beforeend', html);
-    window._refreshSnapshot(ip);
+    window._setViewerMode(ip, 'snap');
+  };
+
+  window._closeViewer = function() {
+    const overlay = document.getElementById('viewer-overlay');
+    if (!overlay) return;
+    const img = document.getElementById('viewer-img');
+    if (img) img.src = '';   // stop MJPEG stream
+    overlay.remove();
+  };
+
+  window._saveAndLoad = async function(ip) {
+    const user = (document.getElementById('viewer-user') || {}).value || 'admin';
+    const pass = (document.getElementById('viewer-pass') || {}).value || '';
+    try {
+      await fetch(`/api/devices/${encodeURIComponent(ip)}/credentials`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user, password: pass })
+      });
+      addActivityEvent('found', `Credentials saved for ${ip}`);
+    } catch(e) {
+      addActivityEvent('error', `Failed to save credentials for ${ip}`);
+    }
+    const liveBtn = document.getElementById('viewer-btn-live');
+    const mode = liveBtn && liveBtn.classList.contains('cam__viewer__btn--active') ? 'live' : 'snap';
+    window._setViewerMode(ip, mode);
+  };
+
+  window._setViewerMode = function(ip, mode) {
+    const img     = document.getElementById('viewer-img');
+    const errEl   = document.getElementById('viewer-snap-error');
+    const snapBtn = document.getElementById('viewer-btn-snap');
+    const liveBtn = document.getElementById('viewer-btn-live');
+    if (!img) return;
+
+    if (snapBtn) snapBtn.classList.toggle('cam__viewer__btn--active', mode === 'snap');
+    if (liveBtn) liveBtn.classList.toggle('cam__viewer__btn--active', mode === 'live');
+
+    const user = (document.getElementById('viewer-user') || {}).value || 'admin';
+    const pass = (document.getElementById('viewer-pass') || {}).value || '';
+
+    if (mode === 'live') {
+      img.src = '';
+      if (errEl) errEl.style.display = 'none';
+      img.style.opacity = '0.4';
+      const streamUrl = `/api/devices/${encodeURIComponent(ip)}/stream?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`;
+      img.onload  = () => { img.style.opacity = '1'; };
+      img.onerror = () => {
+        img.style.opacity = '0';
+        if (errEl) errEl.style.display = '';
+        if (liveBtn) liveBtn.classList.remove('cam__viewer__btn--active');
+        if (snapBtn) snapBtn.classList.add('cam__viewer__btn--active');
+      };
+      img.src = streamUrl;
+    } else {
+      img.src = '';   // stop any live stream first
+      window._refreshSnapshot(ip);
+    }
   };
 
   window._queryOnvifInfo = async function(ip) {
-    const btn = document.getElementById(`viewer-onvif-btn-${ip}`);
+    const btn    = document.getElementById(`viewer-onvif-btn-${ip}`);
     const infoEl = document.getElementById(`viewer-info-${ip}`);
     if (btn) { btn.disabled = true; btn.textContent = 'Querying…'; }
     const user = (document.getElementById('viewer-user') || {}).value || 'admin';
@@ -1106,7 +1726,6 @@
       if (info.error) {
         addActivityEvent('error', `ONVIF info failed for ${ip}: ${info.error}`);
       } else {
-        // Update device in local state
         const d = devices.find(x => x.ip === ip);
         if (d) {
           if (info.model)    d.model    = info.model;
@@ -1114,14 +1733,13 @@
           if (info.stream_uris && info.stream_uris.length) d.rtsp_url = info.stream_uris[0];
           renderTable();
         }
-        // Render into info panel
         if (infoEl) {
           let extra = '';
           if (info.manufacturer) extra += `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">Mfr</span><code>${esc(info.manufacturer)}</code></div>`;
-          if (info.model)    extra += `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">Model</span><code>${esc(info.model)}</code></div>`;
-          if (info.firmware) extra += `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">FW</span><code>${esc(info.firmware)}</code></div>`;
-          if (info.serial)   extra += `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">S/N</span><code>${esc(info.serial)}</code></div>`;
-          info.stream_uris.forEach((u, i) => {
+          if (info.model)        extra += `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">Model</span><code>${esc(info.model)}</code></div>`;
+          if (info.firmware)     extra += `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">FW</span><code>${esc(info.firmware)}</code></div>`;
+          if (info.serial)       extra += `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">S/N</span><code>${esc(info.serial)}</code></div>`;
+          (info.stream_uris || []).forEach((u, i) => {
             extra += `<div class="cam__viewer__info-row"><span class="cam__viewer__info-label">Stream ${i+1}</span><code>${esc(u)}</code> <button class="cam__viewer__btn" style="padding:1px 6px;font-size:10px" onclick="navigator.clipboard.writeText('${esc(u)}').then(()=>addActivityEvent('found','RTSP copied'))">Copy</button></div>`;
           });
           infoEl.insertAdjacentHTML('beforeend', extra);
@@ -1135,21 +1753,19 @@
   };
 
   window._refreshSnapshot = function(ip) {
-    const img = document.getElementById('viewer-img');
+    const img   = document.getElementById('viewer-img');
     const errEl = document.getElementById('viewer-snap-error');
     if (!img) return;
     const user = (document.getElementById('viewer-user') || {}).value || 'admin';
     const pass = (document.getElementById('viewer-pass') || {}).value || '';
-    const ts = Date.now();
-    const url = `/api/devices/${encodeURIComponent(ip)}/snapshot?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}&_=${ts}`;
+    const ts   = Date.now();
+    const url  = `/api/devices/${encodeURIComponent(ip)}/snapshot?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}&_=${ts}`;
+    img.src = '';
     img.style.opacity = '0.4';
     if (errEl) errEl.style.display = 'none';
     const tester = new Image();
-    tester.onload = () => { img.src = url; img.style.opacity = '1'; };
-    tester.onerror = () => {
-      img.style.opacity = '0';
-      if (errEl) errEl.style.display = '';
-    };
+    tester.onload  = () => { img.src = url; img.style.opacity = '1'; };
+    tester.onerror = () => { img.style.opacity = '0'; if (errEl) errEl.style.display = ''; };
     tester.src = url;
   };
 
@@ -1245,12 +1861,7 @@
   }
 
   // ─── Utilities ──────────────────────────────────────────────────────
-  function esc(str) {
-    if (str == null) return '';
-    const div = document.createElement('div');
-    div.textContent = String(str);
-    return div.innerHTML;
-  }
+  // (esc is defined at module scope — line 12 — no duplicate needed)
 
   function debounce(fn, ms) {
     let timer;

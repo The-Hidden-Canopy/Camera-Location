@@ -1,4 +1,4 @@
-"""Flask web server + SSE API for Camera Discovery Octopus"""
+"""Flask web server + SSE API for Hidden Canopy Network Discovery"""
 
 from __future__ import annotations
 
@@ -9,18 +9,77 @@ from datetime import datetime
 from typing import Dict, List
 
 import ipaddress
+import re
 import urllib.request
 import urllib.error
 
 from flask import Flask, render_template, jsonify, request, Response, send_file
 
 from .orchestrator import DiscoveryOrchestrator
-from .models import DiscoveredDevice, SubnetZone, CapturePosition, CAPTURE_POSITIONS, DPI_STAGES, DPI_STAGE_LABELS
-from .network import NetworkInterface, get_interfaces
+from .models import (
+    DiscoveredDevice, SubnetZone, CapturePosition, CAPTURE_POSITIONS,
+    DPI_STAGES, DPI_STAGE_LABELS, SENSOR_QUALITY,
+)
+from .network import NetworkInterface, get_interfaces, install_signal_handlers, cleanup_temp_ips
 from .report import export_to_csv, export_to_json, generate_summary
 
 
+def expand_subnet_range(entry: str) -> List[str]:
+    """
+    Expand a subnet range string into a list of CIDR strings.
+
+    Supported formats:
+      '172.16.1-22.0/24'  -> ['172.16.1.0/24', '172.16.2.0/24', ..., '172.16.22.0/24']
+      '192.168.1.0/24'    -> ['192.168.1.0/24']
+      '192.168.1.100'     -> ['192.168.1.0/24']  (bare IP -> /24)
+      '10.0.0-3.0/24'     -> ['10.0.0.0/24', '10.0.1.0/24', '10.0.2.0/24', '10.0.3.0/24']
+    """
+    entry = entry.strip()
+    if not entry:
+        return []
+
+    # Range pattern: A.B.X-Y.D/P  (third octet is a numeric range)
+    m = re.match(r'^(\d+)\.(\d+)\.(\d+)-(\d+)\.(\d+)(?:/(\d+))?$', entry)
+    if m:
+        a, b, start, end, d, prefix = m.groups()
+        prefix = int(prefix) if prefix else 24
+        results = []
+        for c in range(int(start), int(end) + 1):
+            try:
+                net = ipaddress.IPv4Network(f"{a}.{b}.{c}.{d}/{prefix}", strict=False)
+                results.append(str(net))
+            except Exception:
+                pass
+        return results
+
+    # Plain CIDR
+    if '/' in entry:
+        try:
+            return [str(ipaddress.IPv4Network(entry, strict=False))]
+        except Exception:
+            return []
+
+    # Bare IP -> /24
+    try:
+        addr = ipaddress.IPv4Address(entry)
+        parts = str(addr).split('.')
+        return [f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"]
+    except Exception:
+        pass
+
+    return []
+
+
 def create_app() -> Flask:
+    # create_app() is the universal main-thread chokepoint for every web
+    # launch path (python -m camdiscover web, cli run_web, Electron). Install
+    # the netsh-cleanup signal handlers here so the desktop app window closing
+    # or Ctrl+C always tears down temporary IPs. Idempotent.
+    try:
+        install_signal_handlers()
+    except Exception:
+        pass
+
     app = Flask(
         __name__,
         template_folder="web/templates",
@@ -30,6 +89,7 @@ def create_app() -> Flask:
     # Global state
     orchestrator = DiscoveryOrchestrator()
     devices_lock = threading.Lock()
+    scan_state_lock = threading.Lock()
     scan_thread: threading.Thread | None = None
     scan_running = False
     scan_progress = {"phase": "idle", "current": 0, "total": 0, "message": "Ready"}
@@ -96,50 +156,117 @@ def create_app() -> Flask:
     @app.route("/api/scan", methods=["POST"])
     def api_scan():
         nonlocal scan_thread, scan_running
-        if scan_running:
-            return jsonify({"error": "Scan already running"}), 409
+        with scan_state_lock:
+            if scan_running:
+                return jsonify({"error": "Scan already running"}), 409
 
-        body = request.json or {}
-        mode = body.get("mode", "listen")
-        interface_name = body.get("interface", "")
-        subnets = body.get("subnets", None)
+            body = request.json or {}
+            mode = body.get("mode", "listen")
+            interface_name = body.get("interface", "")
+            raw_subnets = body.get("subnets", None)
+            # Default: always start fresh.  The frontend can pass "clear": false
+            # to append results from a second scan onto an existing session instead.
+            clear_devices = body.get("clear", True)
 
-        # Select interface
-        interfaces = orchestrator.select_interface(interface_name)
-        if interface_name:
-            match = next((i for i in interfaces if i.name == interface_name), None)
-            if match:
-                orchestrator.set_interface(match)
-        elif interfaces:
-            best = next((i for i in interfaces if i.iface_type == "ethernet"), interfaces[0])
-            orchestrator.set_interface(best)
+            # Expand subnet ranges (e.g. "172.16.1-22.0/24" -> 22 individual CIDRs)
+            subnets = None
+            if raw_subnets:
+                raw_list = raw_subnets if isinstance(raw_subnets, list) else [raw_subnets]
+                expanded: List[str] = []
+                for entry in raw_list:
+                    for part in str(entry).split(','):
+                        expanded.extend(expand_subnet_range(part.strip()))
+                subnets = expanded if expanded else None
 
-        scan_running = True
+            # Select interface — select_interface already sets selected_interface
+            # internally; we call set_interface only to trigger capture-position
+            # auto-detection, but ONLY if the operator hasn't manually overridden it.
+            interfaces = orchestrator.select_interface(interface_name)
+            if interface_name:
+                match = next((i for i in interfaces if i.name == interface_name), None)
+                if match:
+                    orchestrator.set_interface(match)
+            elif interfaces:
+                best = next((i for i in interfaces if i.iface_type == "ethernet"), interfaces[0])
+                orchestrator.set_interface(best)
 
-        def run_scan():
-            nonlocal scan_running
-            try:
-                orchestrator.run(mode, subnets)
-            except Exception as e:
-                emit_event("error", {"message": str(e)})
-            finally:
-                scan_running = False
-                emit_event("scan_complete", {"device_count": len(orchestrator.discovered_devices)})
+            scan_running = True
 
-        scan_thread = threading.Thread(target=run_scan, daemon=True)
-        scan_thread.start()
+            def run_scan():
+                nonlocal scan_running, scan_thread
+                try:
+                    orchestrator.run(mode, subnets, clear=clear_devices)
+                except Exception as e:
+                    emit_event("error", {"message": str(e)})
+                finally:
+                    with scan_state_lock:
+                        scan_running = False
+                        scan_thread = None
+                    emit_event("scan_complete", {"device_count": len(orchestrator.discovered_devices)})
+
+            scan_thread = threading.Thread(target=run_scan, daemon=True)
+            scan_thread.start()
 
         return jsonify({"status": "started", "mode": mode})
 
     @app.route("/api/scan/stop", methods=["POST"])
     def api_scan_stop():
+        nonlocal scan_thread, scan_running
         orchestrator.stop()
-        return jsonify({"status": "stopping"})
+        thread = scan_thread
+        still_running = False
+        if thread and thread.is_alive():
+            thread.join(timeout=1.5)
+            still_running = thread.is_alive()
+        with scan_state_lock:
+            if not still_running:
+                scan_running = False
+                scan_thread = None
+        return jsonify({"status": "stopping" if still_running else "stopped", "running": still_running})
+
+    @app.route("/api/devices/clear", methods=["POST"])
+    def api_devices_clear():
+        """Explicitly clear all discovered devices (user-initiated reset only)."""
+        if scan_running:
+            return jsonify({"error": "Cannot clear while scan is running"}), 409
+        orchestrator.devices.clear()
+        emit_event("devices_cleared", {})
+        return jsonify({"status": "cleared"})
 
     @app.route("/api/devices")
     def api_devices():
         with devices_lock:
             return jsonify([d.to_dict() for d in orchestrator.discovered_devices])
+
+    @app.route("/api/triage")
+    def api_triage():
+        """Live triage-engine state: current task + the four priority queues.
+        The UI polls this so the operator can see exactly what the single
+        sequential probe worker is doing and what is queued next."""
+        return jsonify(orchestrator.triage_state())
+
+    @app.route("/api/triage/ingest", methods=["POST"])
+    def api_triage_ingest():
+        """Ingest out-of-band evidence for silent/orphaned devices:
+        a switch MAC/port table, DHCP leases, LLDP/SNMP neighbor detail,
+        DNS name exports, a router ARP dump, or an NVR channel list. Accepts JSON {kind,text} or a multipart file upload
+        (form fields: kind, file). Everything becomes evidence — never a guess."""
+        kind, text = "", ""
+        if request.files.get("file"):
+            kind = request.form.get("kind", "")
+            try:
+                text = request.files["file"].read().decode("utf-8", errors="replace")
+            except Exception:
+                text = ""
+        else:
+            body = request.json or {}
+            kind = body.get("kind", "")
+            text = body.get("text", "")
+        if not kind or not text.strip():
+            return jsonify({"error": "kind and text (or file) are required"}), 400
+        summary = orchestrator.ingest_external_evidence(kind, text)
+        emit_event("triage_ingested", {"kind": kind, **summary})
+        return jsonify({"status": "ingested", "kind": kind, "summary": summary})
 
     @app.route("/api/status")
     def api_status():
@@ -156,24 +283,24 @@ def create_app() -> Flask:
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow([
-            "IP", "MAC", "Vendor", "Model", "Hostname", "Ports",
+            "IP", "MAC", "Vendor", "Device Type", "Model", "Hostname", "Ports",
             "ONVIF", "RTSP", "Web URL", "RTSP URL", "ONVIF URL",
             "Subnet", "Subnet Zone", "Confidence", "DPI Score",
             "DPI Summary", "Discovery Methods", "Last Seen",
         ])
         for d in orchestrator.discovered_devices:
             writer.writerow([
-                d.ip, d.mac, d.vendor, d.model, d.hostname,
+                d.ip, d.mac, d.vendor, d.device_type, d.model, d.hostname,
                 ";".join(str(p) for p in d.open_ports),
                 d.onvif_status, d.rtsp_status,
                 d.web_url, d.rtsp_url, d.onvif_url,
-                d.subnet, d.subnet_zone, d.confidence, d.dpi_score,
+                d.subnet, d.subnet_zone, d.camera_confidence, d.dpi_score,
                 d.dpi_summary,
                 ";".join(d.discovery_methods),
                 d.last_seen.isoformat(),
             ])
         return Response(output.getvalue(), mimetype="text/csv", headers={
-            "Content-Disposition": "attachment; filename=camera-discovery.csv"
+            "Content-Disposition": "attachment; filename=network-discovery.csv"
         })
 
     @app.route("/api/export/json")
@@ -181,7 +308,7 @@ def create_app() -> Flask:
         import json as _json, io
         data = [d.to_dict() for d in orchestrator.discovered_devices]
         output = io.BytesIO(_json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"))
-        return send_file(output, as_attachment=True, download_name="camera-discovery.json",
+        return send_file(output, as_attachment=True, download_name="network-discovery.json",
                          mimetype="application/json")
 
     @app.route("/api/events")
@@ -319,7 +446,16 @@ def create_app() -> Flask:
         device = orchestrator.devices.get(ip)
         username = request.args.get("user", "admin")
         password = request.args.get("pass", "")
-        onvif_url = (device.onvif_url if device else "") or f"http://{ip}:8899/onvif/device_service"
+        # If no stored URL, try each open HTTP port in preference order.
+        # Port 8899 is a proprietary default; most cameras use 80 or 8080.
+        onvif_url = (device.onvif_url if device else "") or ""
+        if not onvif_url:
+            open_ports = list(device.open_ports if device else [])
+            for port in [p for p in (80, 8080, 8899, 443) if not open_ports or p in open_ports]:
+                onvif_url = f"http://{ip}:{port}/onvif/device_service"
+                break
+            else:
+                onvif_url = f"http://{ip}:80/onvif/device_service"
         from .discovery import query_onvif_device_info
         info = query_onvif_device_info(ip, onvif_url, username, password)
         return jsonify({
@@ -337,69 +473,186 @@ def create_app() -> Flask:
     @app.route("/api/devices/<ip>/snapshot")
     def api_snapshot(ip):
         """Proxy a JPEG snapshot from the camera, trying vendor-specific URLs."""
+        import ssl as _ssl
         device = orchestrator.devices.get(ip)
         vendor = (device.vendor if device else "").lower()
-        open_ports = device.open_ports if device else []
+        open_ports = list(device.open_ports if device else [])
         username = request.args.get("user", "admin")
         password = request.args.get("pass", "")
 
-        http_port = 80
-        for p in (80, 8080, 443):
-            if not open_ports or p in open_ports:
-                http_port = p
-                break
+        # Build an SSL context that accepts self-signed camera certs.
+        # Almost every camera uses a self-signed cert — strict verification
+        # would reject all of them.
+        _ssl_ctx = _ssl.create_default_context()
+        _ssl_ctx.check_hostname = False
+        _ssl_ctx.verify_mode = _ssl.CERT_NONE
 
-        scheme = "https" if http_port == 443 else "http"
-        base = f"{scheme}://{ip}:{http_port}"
+        def _make_opener(url: str):
+            mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+            # Always register credentials — even blank password — so the
+            # auth handler can respond to a 401 Digest/Basic challenge.
+            mgr.add_password(None, url, username, password)
+            return urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=_ssl_ctx),
+                urllib.request.HTTPDigestAuthHandler(mgr),
+                urllib.request.HTTPBasicAuthHandler(mgr),
+            )
 
-        candidate_paths = []
-        if "hikvision" in vendor:
-            candidate_paths = [
-                "/ISAPI/Streaming/channels/101/picture",
-                "/onvif-http/snapshot?Profile_1",
-                "/Streaming/channels/1/picture",
+        # Try every HTTP port the device has open, in preference order.
+        # Fall back to 80 only if no port scan has run yet.
+        http_ports = [p for p in (80, 8080, 443, 8443) if p in open_ports] or [80]
+
+        for http_port in http_ports:
+            scheme = "https" if http_port in (443, 8443) else "http"
+            base = f"{scheme}://{ip}:{http_port}"
+
+            candidate_paths = []
+            if "hikvision" in vendor:
+                candidate_paths = [
+                    "/ISAPI/Streaming/channels/101/picture",
+                    "/Streaming/channels/1/picture",
+                    "/onvif-http/snapshot?Profile_1",
+                ]
+            elif "dahua" in vendor or "amcrest" in vendor:
+                candidate_paths = [
+                    "/cgi-bin/snapshot.cgi",
+                    "/cgi-bin/snapshot.cgi?channel=1",
+                    "/cgi-bin/mjpg/video.cgi?channel=0&subtype=1",
+                ]
+            elif "axis" in vendor:
+                candidate_paths = ["/axis-cgi/jpg/image.cgi"]
+            elif "reolink" in vendor:
+                candidate_paths = ["/cgi-bin/api.cgi?cmd=Snap&channel=0&rs=abc"]
+            elif "hanwha" in vendor or "wisenet" in vendor:
+                candidate_paths = ["/cgi-bin/viewer/video.jpg"]
+            elif "twenty20" in vendor or "petrocloud" in vendor:
+                # Twenty20/PetroCloud — form-based login, no HTTP snapshot endpoint
+                candidate_paths = []
+
+            candidate_paths += [
+                "/snapshot.jpg", "/snap.jpg", "/image.jpg",
+                "/jpg/image.jpg", "/tmpfs/auto.jpg",
+                "/cgi-bin/snapshot.cgi", "/onvif/snapshot",
             ]
-        elif "dahua" in vendor or "amcrest" in vendor:
-            candidate_paths = [
-                "/cgi-bin/snapshot.cgi",
-                "/cgi-bin/snapshot.cgi?channel=1",
-                "/cgi-bin/mjpg/video.cgi?channel=0&subtype=1",
-            ]
-        elif "axis" in vendor:
-            candidate_paths = ["/axis-cgi/jpg/image.cgi"]
-        elif "reolink" in vendor:
-            candidate_paths = ["/cgi-bin/api.cgi?cmd=Snap&channel=0&rs=abc"]
-        elif "hanwha" in vendor or "wisenet" in vendor:
-            candidate_paths = ["/cgi-bin/viewer/video.jpg"]
 
-        candidate_paths += [
-            "/snapshot.jpg", "/snap.jpg", "/image.jpg",
-            "/cgi-bin/snapshot.cgi", "/jpg/image.jpg",
-            "/tmpfs/auto.jpg", "/onvif/snapshot",
+            for path in candidate_paths:
+                url = base + path
+                try:
+                    opener = _make_opener(url)
+                    req = urllib.request.Request(
+                        url,
+                        headers={"User-Agent": "CamDiscover/1.0",
+                                 "Accept": "image/jpeg,image/*,*/*"},
+                    )
+                    with opener.open(req, timeout=5) as resp:
+                        ct = resp.headers.get_content_type() or ""
+                        data = resp.read(2_000_000)
+                        if data[:2] == b"\xff\xd8" or "image" in ct:
+                            return Response(data, mimetype="image/jpeg", headers={
+                                "X-Snapshot-URL": url,
+                                "Cache-Control": "no-store",
+                            })
+                except Exception:
+                    continue
+
+        return jsonify({"error": "No snapshot available — try the Web UI link or check credentials"}), 404
+
+    # ─── MJPEG Stream Proxy ───────────────────────────────────────────
+    # Transcodes RTSP → MJPEG via FFmpeg so the browser can show a live feed.
+
+    @app.route("/api/devices/<ip>/stream")
+    def api_stream(ip):
+        """Live MJPEG stream from a camera via FFmpeg RTSP transcoding."""
+        import subprocess as _sp
+        device  = orchestrator.devices.get(ip)
+        user    = request.args.get("user", "admin")
+        passwd  = request.args.get("pass", "")
+        rtsp    = request.args.get("url", "")
+
+        # Pick best RTSP URL: explicit > stored > guessed
+        if not rtsp:
+            rtsp = (device.rtsp_url if device else "") or ""
+        if not rtsp:
+            rtsp = f"rtsp://{ip}:554/"
+        # Embed credentials into the URL — include username even if password is
+        # blank (rtsp://admin:@ip/...) so cameras with no password still auth.
+        # URL-encode both fields so special chars (@ / : in passwords) don't
+        # corrupt the URL structure and cause FFmpeg to reject it.
+        if user and "@" not in rtsp:
+            from urllib.parse import quote as _urlq
+            rtsp = rtsp.replace(
+                "rtsp://",
+                f"rtsp://{_urlq(user, safe='')}:{_urlq(passwd, safe='')}@",
+                1,
+            )
+
+        cmd = [
+            "ffmpeg", "-loglevel", "error",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp,
+            "-f", "mjpeg",
+            "-q:v", "5",      # quality 1-31, lower = better
+            "-r", "10",       # 10 fps
+            "-vf", "scale=iw:ih",
+            "pipe:1",
         ]
 
-        for path in candidate_paths:
-            url = base + path
+        def generate():
+            proc = None   # must be initialised before try so finally can reference it
             try:
-                mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-                if password:
-                    mgr.add_password(None, url, username, password)
-                handler = urllib.request.HTTPDigestAuthHandler(mgr)
-                basic = urllib.request.HTTPBasicAuthHandler(mgr)
-                opener = urllib.request.build_opener(handler, basic)
-                req = urllib.request.Request(url, headers={"User-Agent": "CamDiscover/1.0"})
-                with opener.open(req, timeout=4) as resp:
-                    ct = resp.headers.get_content_type() or ""
-                    data = resp.read(1_000_000)
-                    if data[:2] == b"\xff\xd8" or "image" in ct:
-                        return Response(data, mimetype="image/jpeg", headers={
-                            "X-Snapshot-URL": url,
-                            "Cache-Control": "no-store",
-                        })
-            except Exception:
-                continue
+                proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.DEVNULL)
+                boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                buf = b""
+                while True:
+                    chunk = proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while True:
+                        start = buf.find(b"\xff\xd8")
+                        end   = buf.find(b"\xff\xd9", start + 2) if start != -1 else -1
+                        if start == -1 or end == -1:
+                            break
+                        frame = buf[start:end + 2]
+                        buf   = buf[end + 2:]
+                        yield boundary + frame + b"\r\n"
+            except GeneratorExit:
+                pass
+            finally:
+                if proc is not None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
 
-        return jsonify({"error": "No snapshot available from this device"}), 404
+        return Response(
+            generate(),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ─── Credential store (in-memory, per session) ────────────────────
+
+    _creds: dict = {}   # ip -> {username, password}
+    # Gap 7: _creds and orchestrator.credentials are kept in sync.
+    # orchestrator.credentials is the live reference used by scan workers;
+    # _creds is the local copy that survives across multiple scan starts.
+
+    @app.route("/api/devices/<ip>/credentials", methods=["GET"])
+    def api_creds_get(ip):
+        c = _creds.get(ip, {})
+        return jsonify({"username": c.get("username", "admin"), "password": c.get("password", "")})
+
+    @app.route("/api/devices/<ip>/credentials", methods=["POST"])
+    def api_creds_set(ip):
+        body = request.json or {}
+        entry = {"username": body.get("username", "admin"),
+                 "password": body.get("password", "")}
+        _creds[ip] = entry
+        # Gap 7: mirror into orchestrator so active probes (ONVIF, RTSP)
+        # can use saved credentials without the user having to re-run a scan.
+        orchestrator.credentials[ip] = entry
+        return jsonify({"saved": True})
 
     # ─── Set IP ───────────────────────────────────────────────────────
 
@@ -509,6 +762,164 @@ def create_app() -> Flask:
              "missing": "Hidden exposure to internet",
              "filter": "udp.port == 1900"},
         ])
+
+    # ─── Next Safe Action (Arm 8 — the explainer) ────────────────────
+
+    @app.route("/api/devices/<ip>/next-action")
+    def api_next_action(ip):
+        """Return the single safest next operator action for this device."""
+        action = orchestrator.next_safe_action(ip)
+        device = orchestrator.devices.get(ip)
+        val_entry = None
+        with orchestrator._triage_lock:
+            ve = orchestrator._camera_validation_q.get(ip)
+            val_entry = ve.to_dict() if ve else None
+        return jsonify({
+            "ip":           ip,
+            "action":       action,
+            "confidence":   device.camera_confidence if device else 0,
+            "device_class": device.device_class if device else "unknown",
+            "warn_reset":   device.warn_reset if device else False,
+            "validation":   val_entry,
+        })
+
+    # ─── Camera Validation Queue ──────────────────────────────────────
+
+    @app.route("/api/camera-validation")
+    def api_camera_validation():
+        with orchestrator._triage_lock:
+            items = [v.to_dict() for v in orchestrator._camera_validation_q.values()]
+        # Enrich with device data
+        for item in items:
+            dev = orchestrator.devices.get(item["ip"])
+            if dev:
+                item["vendor"] = dev.vendor
+                item["model"]  = dev.model
+                item["confidence"] = dev.camera_confidence
+        return jsonify(items)
+
+    # ─── Gateway Mismatch Queue ───────────────────────────────────────
+
+    @app.route("/api/gateway-mismatches")
+    def api_gateway_mismatches():
+        with orchestrator._triage_lock:
+            items = [g.to_dict() for g in orchestrator._gateway_mismatch_q.values()]
+        return jsonify(items)
+
+    # ─── Multicast Groups ─────────────────────────────────────────────
+
+    @app.route("/api/multicast-groups")
+    def api_multicast_groups():
+        with orchestrator._triage_lock:
+            groups = [g.to_dict() for g in orchestrator._multicast_groups.values()]
+        return jsonify(groups)
+
+    # ─── Interface Profile ────────────────────────────────────────────
+
+    @app.route("/api/interface-profile")
+    def api_interface_profile():
+        """Return current adapter state including DHCP / temp-IP warnings."""
+        from .network import get_interfaces
+        iface = orchestrator.selected_interface
+        if not iface:
+            return jsonify({"error": "No interface selected"}), 404
+
+        # Detect temporary / manually-assigned IPs on the adapter
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["netsh", "interface", "ipv4", "show", "addresses", iface.name],
+                capture_output=True, text=True, timeout=5,
+            )
+            raw = r.stdout
+        except Exception:
+            raw = ""
+
+        dhcp_enabled = "dhcp" in raw.lower() or "yes" in raw.lower()
+        from .network import _TEMP_IPS
+        temp_ips = [ip for (ifn, ip) in list(_TEMP_IPS) if ifn == iface.name]
+
+        warnings = []
+        if temp_ips:
+            warnings.append(
+                f"This adapter has {len(temp_ips)} temporary IP(s) added by the scanner: "
+                + ", ".join(temp_ips) +
+                ". Discovery results may reflect a service/repair configuration."
+            )
+        if not dhcp_enabled and iface.ip:
+            warnings.append(
+                "This adapter appears to be using a static/manual IP. "
+                "Verify this is the correct network before trusting scan results."
+            )
+
+        cp = orchestrator.capture_position
+        sq = SENSOR_QUALITY.get(cp.position, SENSOR_QUALITY.get("unknown"))
+        return jsonify({
+            "name":         iface.name,
+            "ip":           iface.ip,
+            "mac":          iface.mac,
+            "iface_type":   iface.iface_type,
+            "dhcp_enabled": dhcp_enabled,
+            "temp_ips":     temp_ips,
+            "warnings":     warnings,
+            "sensor": {
+                "position":  cp.position,
+                "label":     CAPTURE_POSITIONS.get(cp.position, cp.position),
+                "quality":   sq["label"],
+                "colour":    sq["colour"],
+                "note":      sq["note"],
+                "can_see_unicast":    cp.can_see_unicast,
+                "can_see_broadcast":  cp.can_see_broadcast,
+                "can_see_multicast":  cp.can_see_multicast,
+            },
+        })
+
+    # ─── Infrastructure warnings (device-class labels only) ──────────────
+
+    @app.route("/api/seeds")
+    def api_seeds():
+        from .seeds import INFRASTRUCTURE_WARNINGS
+        return jsonify({
+            "infrastructure_warnings": INFRASTRUCTURE_WARNINGS,
+        })
+
+    # ─── APIPA Devices ────────────────────────────────────────────────
+
+    @app.route("/api/apipa-devices")
+    def api_apipa_devices():
+        """Return all devices observed with a 169.254.x.x address."""
+        from .seeds import is_apipa
+        devices = [d.to_dict() for d in orchestrator.discovered_devices
+                   if d.apipa_seen or is_apipa(d.ip)]
+        return jsonify(devices)
+
+    # ─── Lost / Mismatched Devices ────────────────────────────────────
+
+    @app.route("/api/lost-devices")
+    def api_lost_devices():
+        """Consolidated view: mismatch + gateway-mismatch + orphan queues."""
+        with orchestrator._triage_lock:
+            mismatches = [m.to_dict() for m in orchestrator._mismatch_q.values()]
+            gw_mismatches = [g.to_dict() for g in orchestrator._gateway_mismatch_q.values()]
+            orphans = [o.to_dict() for o in orchestrator._orphan_q.values()]
+
+        # Enrich mismatch entries with device data where available
+        for item in mismatches + gw_mismatches:
+            dev = orchestrator.devices.get(item.get("ip", ""))
+            if dev:
+                item["device_class"] = dev.device_class
+                item["vendor"] = dev.vendor
+                item["warn_reset"] = dev.warn_reset
+                item["last_seen"] = dev.last_seen.isoformat()
+                item["confidence"] = dev.camera_confidence
+                item["open_ports"] = list(dev.open_ports)  # snapshot — triage thread mutates this list
+
+        return jsonify({
+            "mismatches":        mismatches,
+            "gateway_mismatches": gw_mismatches,
+            "orphans":           orphans,
+            "total":             len(mismatches) + len(gw_mismatches) + len(orphans),
+        })
 
     return app
 

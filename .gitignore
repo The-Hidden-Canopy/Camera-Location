@@ -21,6 +21,8 @@ build/
 .venv/
 venv/
 env/
+.bundled-runtime/
+.python-runtime/
 
 # Output files
 *.csv

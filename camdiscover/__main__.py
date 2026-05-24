@@ -3,6 +3,15 @@ import sys
 
 
 def main():
+    # Install SIGINT/SIGTERM/SIGBREAK handlers on the main thread so closing
+    # the desktop window, Ctrl+C, or taskkill always tears down any
+    # temporary netsh IPs before the process dies.
+    try:
+        from .network import install_signal_handlers
+        install_signal_handlers()
+    except Exception:
+        pass
+
     if len(sys.argv) > 1 and sys.argv[1] == "web":
         from .webapp import create_app
         app = create_app()

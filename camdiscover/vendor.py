@@ -1,4 +1,4 @@
-"""MAC OUI vendor lookup and device fingerprinting for cameras"""
+"""MAC OUI vendor lookup, camera fingerprinting, and generic device typing."""
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -113,6 +113,13 @@ class FingerprintResult:
     model: str
     confidence: int
     protocols: List[str]
+
+
+@dataclass
+class DeviceTypeResult:
+    device_type: str
+    confidence: int
+    warn_reset: bool = False
 
 
 def fingerprint_device(
@@ -230,3 +237,55 @@ def fingerprint_device(
 
     result.confidence = min(result.confidence, 100)
     return result
+
+
+def classify_device_type(
+    vendor: str,
+    open_ports: List[int],
+    protocols: List[str],
+    http_banner: str = "",
+    model: str = "",
+    hostname: str = "",
+    camera_confidence: int = 0,
+) -> DeviceTypeResult:
+    """Classify a discovered host into a generic network device type."""
+    vendor_l = (vendor or "").lower()
+    banner_l = (http_banner or "").lower()
+    model_l = (model or "").lower()
+    host_l = (hostname or "").lower()
+    proto_l = " ".join((protocols or [])).lower()
+    port_set = set(open_ports or [])
+    joined = " ".join(part for part in (vendor_l, banner_l, model_l, host_l, proto_l) if part)
+
+    printer_ports = {631, 9100}
+    endpoint_ports = {445, 3389}
+    infra_ports = {22, 23, 53}
+
+    if any(token in joined for token in ("nvr", "dvr", "network video recorder", "digital video recorder")):
+        return DeviceTypeResult("nvr", 85, warn_reset=True)
+
+    if camera_confidence >= 50 or port_set.intersection({554, 8554, 8899}):
+        return DeviceTypeResult("camera", max(camera_confidence, 70))
+
+    if port_set.intersection(printer_ports) or any(token in joined for token in ("printer", "laserjet", "deskjet", "xerox", "brother", "canon", "epson")):
+        return DeviceTypeResult("printer", 80)
+
+    if any(token in joined for token in ("vmware", "hyper-v", "parallels", "virtualbox")):
+        return DeviceTypeResult("virtual_machine", 80)
+
+    if any(token in joined for token in ("ubiquiti", "router", "gateway", "firewall", "switch", "access point", "mikrotik", "cisco", "juniper", "aruba", "fortinet", "sophos", "unifi")):
+        return DeviceTypeResult("network_infrastructure", 78, warn_reset=True)
+
+    if port_set.intersection(infra_ports) and any(token in joined for token in ("controller", "gateway", "router", "switch", "dns", "ap")):
+        return DeviceTypeResult("network_infrastructure", 72, warn_reset=True)
+
+    if port_set.intersection({22, 161, 162, 179, 443}) and any(token in joined for token in ("server", "nas", "synology", "qnap")):
+        return DeviceTypeResult("server", 70, warn_reset=True)
+
+    if port_set.intersection(endpoint_ports) and any(token in joined for token in ("desktop", "laptop", "windows", "workstation")):
+        return DeviceTypeResult("endpoint", 65)
+
+    if vendor_l != "unknown" and vendor_l:
+        return DeviceTypeResult("network_device", 45)
+
+    return DeviceTypeResult("unknown", 15)

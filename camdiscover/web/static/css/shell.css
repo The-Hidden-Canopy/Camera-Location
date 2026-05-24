@@ -245,6 +245,27 @@
   border-color: rgba(201,64,64,.5);
 }
 
+.cam__clear-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all .12s;
+  border: 1px solid rgba(148,163,184,.25);
+  background: rgba(148,163,184,.08);
+  color: var(--text-muted);
+}
+.cam__clear-btn:hover {
+  background: rgba(201,64,64,.12);
+  border-color: rgba(201,64,64,.3);
+  color: var(--error);
+}
+
 .cam__export-group {
   display: flex;
   gap: 4px;

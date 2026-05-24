@@ -36,7 +36,7 @@ def export_to_csv(devices: List[DiscoveredDevice], filename: str) -> str:
             d.rtsp_url,
             d.onvif_url,
             d.subnet,
-            f"{d.confidence}%",
+            f"{d.camera_confidence}%",   # Gap 11: evidence-based score
             ";".join(d.discovery_methods),
             d.last_seen.isoformat(),
         ])
@@ -102,7 +102,7 @@ def generate_summary(devices: List[DiscoveredDevice]) -> str:
             lines.append(f"    ONVIF: {d.onvif_url}")
         if d.open_ports:
             lines.append(f"    Ports: {', '.join(str(p) for p in d.open_ports)}")
-        lines.append(f"    Confidence: {d.confidence}% | Methods: {', '.join(d.discovery_methods)}")
+        lines.append(f"    Confidence: {d.camera_confidence}% | Methods: {', '.join(d.discovery_methods)}")
         lines.append("")
 
     return "\n".join(lines)
