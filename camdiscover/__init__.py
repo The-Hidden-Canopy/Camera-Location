@@ -6,11 +6,10 @@ Passive sniffer + DHCP catcher + ONVIF finder + RTSP/web scanner + MAC/vendor id
 
 __version__ = "1.0.0"
 
-# Primary TCP service ports used for discovery and coarse classification.
-# We still bias toward camera/NVR protocols, but include a small set of
-# common infrastructure and endpoint services so the app can classify more
-# than just cameras.
-CAMERA_PORTS = {
+# TCP ports scanned by scan_ports().  UDP-only protocols are handled by the
+# DPI collector's dedicated listener threads; scanning them as TCP would
+# produce misleading "port open" evidence.
+TCP_SCAN_PORTS = {
     22:      "SSH management",
     23:      "Telnet management",
     53:      "DNS service",
@@ -28,12 +27,21 @@ CAMERA_PORTS = {
     445:     "SMB file sharing",
     37777:   "Dahua/Amcrest service",
     37778:   "Dahua alternate",
-    3702:    "ONVIF WS-Discovery (UDP)",
-    1900:    "SSDP/UPnP (UDP)",
-    5353:    "mDNS (UDP)",
+    34567:   "Dahua P2P",
 }
 
-ALL_CAMERA_PORTS = sorted(CAMERA_PORTS.keys())
+# UDP-only discovery protocols — handled by DPI/passive listeners only,
+# never TCP-probed.
+UDP_DISCOVERY_PROTOCOLS = {
+    3702:    "ONVIF WS-Discovery",
+    1900:    "SSDP/UPnP",
+    5353:    "mDNS",
+    37020:   "Hikvision SADP",
+}
+
+# Legacy alias — kept so existing call-sites don't break.
+CAMERA_PORTS = TCP_SCAN_PORTS
+ALL_CAMERA_PORTS = sorted(TCP_SCAN_PORTS.keys())
 
 CAMERA_SUBNETS = [
     "192.168.1.0/24",
