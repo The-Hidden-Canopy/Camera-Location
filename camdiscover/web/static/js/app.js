@@ -543,19 +543,14 @@
 
     switch(type) {
       case 'device_found':
-        devices.push(data);
+        upsertDevice(data);
         addActivityEvent('found', `Found ${data.ip} — ${data.vendor}`);
         renderTable();
         updateStats();
         break;
 
       case 'device_updated':
-        const idx = devices.findIndex(d => d.ip === data.ip);
-        if (idx >= 0) {
-          devices[idx] = data;
-        } else {
-          devices.push(data);
-        }
+        upsertDevice(data);
         renderTable();
         updateStats();
         break;
@@ -767,6 +762,7 @@
           mode: currentMode,
           interface: ifaceSelect.value,
           subnets,       // null = auto-detect; array = explicit targets
+          clear: false,  // preserve evidence across mode switches; use Clear button to reset
         }),
       });
       if (!resp.ok) {
@@ -778,6 +774,14 @@
       addActivityEvent('error', 'Network error starting scan');
       setScanning(false);
     }
+  }
+
+  // Upsert helper — both device_found and device_updated go through here so
+  // the table never contains duplicate rows regardless of event ordering.
+  function upsertDevice(d) {
+    const idx = devices.findIndex(x => x.ip === d.ip);
+    if (idx >= 0) devices[idx] = d;
+    else devices.push(d);
   }
 
   async function stopScan() {
