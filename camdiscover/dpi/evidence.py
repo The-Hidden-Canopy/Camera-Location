@@ -47,8 +47,8 @@ EVIDENCE_WEIGHTS: dict[str, int] = {
     "dhcp_lease_seen":            8,   # Device has a DHCP lease
     "router_arp_seen":            5,   # Device in router ARP dump
     "snmp_sysname_seen":          8,   # SNMP sysName/sysDescr style identity seen
-    "snmp_printer_hint":         12,   # SNMP text suggests printer/copier
-    "snmp_infra_hint":           12,   # SNMP text suggests router/switch/ap/firewall
+    "snmp_printer_hint":        -30,   # SNMP text confirms printer/copier — definitely not a camera
+    "snmp_infra_hint":          -25,   # SNMP text confirms router/switch/AP/firewall — not a camera
     "dns_name_seen":              6,   # DNS or reverse-DNS name supplied from external evidence
     # ── Weak supporting signals ──────────────────────────────────────────
     "igmp_multicast_stream":      5,   # IGMP join on known video multicast group
