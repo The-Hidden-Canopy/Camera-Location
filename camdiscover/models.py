@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -10,28 +11,44 @@ from typing import Dict, List, Optional
 # ─── Evidence ─────────────────────────────────────────────────────────────────
 #
 # Each signal captured — whether from a passive listener, active probe, or ARP
-# table — becomes an Evidence object.  The camera_confidence score is the
-# sum of all weights, clamped 0-100.
+# table — becomes an Evidence object and is appended to the ledger permanently.
 #
-# Evidence is ADDITIVE and DEDUPED by kind within the orchestrator so that the
-# same signal observed multiple times does not inflate the score.
+# The ledger is append-only: evidence is never deleted between scans.
+# Each item carries full provenance so conclusions can be traced back to the
+# exact sensor, interface position, and observation that produced them.
+#
+# Evidence is DEDUPED by kind: only the first occurrence per kind is retained.
+# Repeated observations update last_seen on the existing item rather than
+# inflating the score.
 
 @dataclass
 class Evidence:
     kind: str        # key into EVIDENCE_WEIGHTS (e.g. "onvif_probe_match_nvt")
     detail: str      # human-readable description of what was observed
     source: str      # "passive_wsdiscovery" | "active_onvif" | "arp" | "active_rtsp" …
-    weight: int      # contribution to camera_confidence
+    weight: int      # contribution to camera_confidence (can be negative)
     timestamp: datetime = field(default_factory=datetime.now)
     raw: str = ""    # raw snippet (first 500 chars of packet / response)
 
+    # ── Provenance ──────────────────────────────────────────────────────
+    # Every evidence item records exactly where it came from so the UI can
+    # explain why a conclusion was reached and flag coverage gaps.
+    sensor_id: str = ""          # which arm produced this: "dpi_onvif", "passive_sadp", "active_rtsp", …
+    interface: str = ""          # NIC name (e.g. "Ethernet 3")
+    capture_position: str = ""   # "wifi" | "ethernet_same" | "span_port" | "unknown" …
+    visibility_limit: str = ""   # what this sensor position can/cannot see
+
     def to_dict(self) -> dict:
         return {
-            "kind": self.kind,
-            "detail": self.detail,
-            "source": self.source,
-            "weight": self.weight,
-            "timestamp": self.timestamp.isoformat(),
+            "kind":             self.kind,
+            "detail":           self.detail,
+            "source":           self.source,
+            "weight":           self.weight,
+            "timestamp":        self.timestamp.isoformat(),
+            "sensor_id":        self.sensor_id,
+            "interface":        self.interface,
+            "capture_position": self.capture_position,
+            "visibility_limit": self.visibility_limit,
         }
 
 
