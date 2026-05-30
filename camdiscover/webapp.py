@@ -226,10 +226,12 @@ def create_app() -> Flask:
 
     @app.route("/api/devices/clear", methods=["POST"])
     def api_devices_clear():
-        """Explicitly clear all discovered devices (user-initiated reset only)."""
+        """Full session reset — wipes devices and all triage state.
+        Preserves operator config (credentials, subnet zones, interface).
+        Only available when no scan is running."""
         if scan_running:
             return jsonify({"error": "Cannot clear while scan is running"}), 409
-        orchestrator.devices.clear()
+        orchestrator._full_reset()
         emit_event("devices_cleared", {})
         return jsonify({"status": "cleared"})
 
