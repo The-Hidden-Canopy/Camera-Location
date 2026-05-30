@@ -877,8 +877,7 @@ class DiscoveryOrchestrator:
     def _tick_mismatch(self) -> bool:
         with self._triage_lock:
             pend = [m for m in self._mismatch_q.values()
-                    if m.status not in ("dead_or_stale", "alive_wrong_subnet",
-                                        "alive_unreachable_by_route")
+                    if m.status not in ("dead_or_stale", "alive_wrong_subnet")
                     and self._backoff_due(f"mm:{m.ip}")]
             pend.sort(key=lambda m: (m.priority, m.first_seen))
             entry = pend[0] if pend else None
@@ -941,8 +940,13 @@ class DiscoveryOrchestrator:
                                     gateway=entry.suspected_gateway)
         else:
             fails = self._backoff_fail(f"mm:{entry.ip}")
+            # Use "route_missing_retry_pending" as a non-terminal retry state.
+            # "alive_unreachable_by_route" was previously used here but was
+            # excluded by the scheduler filter, giving the device only one real
+            # attempt.  Now the scheduler retries until the backoff limit (3
+            # failures) then marks the entry dead_or_stale.
             entry.status = ("dead_or_stale" if fails >= 3
-                            else "alive_unreachable_by_route")
+                            else "route_missing_retry_pending")
         return True
 
     # ── P3: candidate subnet validation (NEVER a full scan) ─────────────
@@ -2089,13 +2093,12 @@ class DiscoveryOrchestrator:
             self._sniffer = None
 
     def _auto_scan_subnet(self, subnet: str):
-        """Enqueue a freshly-discovered subnet into the triage engine (Gap 12).
+        """Enqueue a freshly-discovered subnet and ensure a worker is running.
 
-        Previously this called _sweep_one_subnet directly in a daemon thread,
-        bypassing the one-active-task rule and racing against the main triage
-        loop.  Now it appends a ScopeCursor to _known_scopes so the triage
-        engine walks it sequentially when P1-P4 capacity is available, exactly
-        as it would for any other known scope.
+        Appends a ScopeCursor so the triage engine walks it in priority order.
+        If no triage loop is currently active (watch mode running between scans,
+        or scan completed before the new subnet arrived) a bounded worker thread
+        is started so the queue doesn't sit idle indefinitely.
         """
         self._emit_progress("auto-scan", 0, 1,
                             f"New subnet {subnet} — queued for triage walk")
@@ -2103,6 +2106,18 @@ class DiscoveryOrchestrator:
             if not any(s.cidr == subnet for s in self._known_scopes):
                 self._known_scopes.append(
                     ScopeCursor(cidr=subnet, source="sniffed"))
+
+        # If the main triage loop is not running, start a lightweight worker
+        # that drains the new scope.  This handles watch-mode-only operation
+        # where run() was never called (or finished) before the subnet arrived.
+        if not self._triage_running:
+            def _watch_worker():
+                try:
+                    self._run_triage("sweep", None)
+                except Exception:
+                    pass
+            threading.Thread(target=_watch_worker, daemon=True,
+                             name="watch-triage-worker").start()
 
     def _validate_dpi_stages(self, ip: str):
         """Run all DPI protocol-stage checks for a device."""
@@ -2321,7 +2336,8 @@ class DiscoveryOrchestrator:
             return False
         if device.open_ports and self._CAMERA_PORTS.intersection(device.open_ports):
             return False
-        if device.device_class in ("nvr", "gateway", "infrastructure", "seed", "seed_nvr"):
+        if device.device_class in ("nvr", "bridge", "router", "switch", "server",
+                                   "gateway", "infrastructure", "seed", "seed_nvr"):
             return False
         if device.subnet_mismatch:
             return False
@@ -2357,12 +2373,31 @@ class DiscoveryOrchestrator:
                                       raw=banner)
                 break
 
+    def _local_subnets(self) -> set:
+        """Return the set of all subnets the selected interface has an IP on.
+
+        Multi-homed adapters (primary + secondary IPs added by the scanner)
+        should not produce false "foreign subnet" alerts for the subnets we
+        deliberately added a secondary address to.
+        """
+        if not self.selected_interface:
+            return set()
+        subnets = set()
+        for s in self.selected_interface.all_subnets():
+            subnets.add(s)
+        # Also include any temporarily-added secondary IPs
+        for cidr in self._scope_temp_ip:
+            subnets.add(cidr)
+        return subnets
+
     def _update_subnet_mismatch(self, device: DiscoveredDevice):
         if not self.selected_interface or not device.ip:
             return
         device.subnet = device.subnet or ip_to_subnet(device.ip)
-        iface_subnet = ip_to_subnet(self.selected_interface.ip) if self.selected_interface.ip else ""
-        if not iface_subnet or device.subnet == iface_subnet:
+        # Compare against ALL locally-assigned subnets, not just the primary.
+        # A device reachable via a secondary IP we added is not a mismatch.
+        local_subnets = self._local_subnets()
+        if not local_subnets or device.subnet in local_subnets:
             return
 
         l2_methods = {"ONVIF", "SSDP", "SADP", "Dahua-UDP", "Passive-DPI", "ARP", "Sniff"}
