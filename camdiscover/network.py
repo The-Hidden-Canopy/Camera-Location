@@ -310,14 +310,37 @@ def get_arp_table() -> List[dict]:
     return entries
 
 
+_PING_FAILURE_PHRASES = (
+    "destination host unreachable",
+    "request timed out",
+    "general failure",
+    "transmit failed",
+    "could not find host",
+    "ping request could not find",
+    "host unreachable",
+)
+
 def ping_host(ip: str, timeout: int = 2000) -> bool:
-    """Ping a host. Returns True if reachable."""
+    """Ping a host. Returns True only when the target itself replied.
+
+    Windows can print "Reply from <gateway>: Destination host unreachable."
+    That satisfies a naive "Reply from" check but the *target* is dead.
+    We reject any reply that contains a failure phrase so gateway-generated
+    ICMP errors are not mistaken for live devices.
+    """
     try:
         result = subprocess.run(
             ["ping", "-n", "1", "-w", str(timeout), ip],
             capture_output=True, text=True, timeout=timeout // 1000 + 2
         )
-        return "TTL=" in result.stdout or "Reply from" in result.stdout
+        out = result.stdout.lower()
+        # Must have TTL (echo reply) or "Reply from" (Windows success)
+        if "ttl=" not in out and "reply from" not in out:
+            return False
+        # Reject gateway-generated failure messages
+        if any(phrase in out for phrase in _PING_FAILURE_PHRASES):
+            return False
+        return True
     except Exception:
         return False
 
@@ -560,9 +583,16 @@ class SniffedSubnet:
 
 
 class SubnetSniffer:
-    """Detect subnets from raw traffic and ARP table changes."""
+    """Detect subnets from raw traffic and ARP table changes.
 
-    _SKIP_PREFIXES = ("0.", "127.", "169.254.", "224.", "239.", "240.", "255.")
+    Only promotes RFC1918 private addresses (10/8, 172.16/12, 192.168/16)
+    and link-local (169.254/16, treated as orphan signal only).  Public
+    internet destination addresses are never promoted to scan targets —
+    normal browsing traffic would otherwise queue arbitrary /24 scans and
+    risk adding secondary IPs for public subnets.
+    """
+
+    _SKIP_PREFIXES = ("0.", "127.", "224.", "239.", "240.", "255.")
 
     def __init__(self):
         self._known: set = set()
@@ -611,9 +641,19 @@ class SubnetSniffer:
     def _report(self, ip: str, source: str):
         if any(ip.startswith(p) for p in self._SKIP_PREFIXES):
             return
-        parts = ip.split(".")
-        if len(parts) != 4:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
             return
+        # Only auto-promote RFC1918 private space.  Public internet addresses
+        # (e.g. 142.x.x.x from a browser tab) must never become scan targets.
+        if not addr.is_private:
+            return
+        # APIPA is handled as an orphan signal, not a scan target
+        if ip.startswith("169.254."):
+            return
+        # Collapse to the observed /24 — full CIDR correction is a separate patch
+        parts = ip.split(".")
         subnet = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
         with self._lock:
             if subnet in self._known:
