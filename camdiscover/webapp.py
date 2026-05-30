@@ -140,6 +140,42 @@ def create_app() -> Flask:
     def favicon():
         return Response(status=204)
 
+    @app.route("/api/capabilities")
+    def api_capabilities():
+        """Return sensor-health status for every passive arm.
+
+        Each arm reports its state so the UI can surface coverage gaps rather
+        than silently showing absent evidence.  A missing arm is never hidden —
+        the operator needs to know if IGMP capture is unavailable because that
+        means multicast evidence cannot be collected from the current position.
+
+        States: starting | active | waiting | port_conflict | permission_denied
+                | failed | unsupported | unknown
+        """
+        dpi = orchestrator._dpi
+        arms = dpi.get_capabilities() if dpi else {}
+
+        # Annotate with overall assessment so the UI can show a single indicator
+        degraded = [arm for arm, info in arms.items()
+                    if info["state"] not in ("active", "waiting", "starting")]
+        coverage = (
+            "full"     if not degraded else
+            "partial"  if len(degraded) < len(arms) // 2 else
+            "degraded"
+        )
+
+        return jsonify({
+            "coverage":        coverage,
+            "degraded_arms":   degraded,
+            "capture_position": orchestrator.capture_position.to_dict(),
+            "interface": {
+                "name":   orchestrator.selected_interface.name  if orchestrator.selected_interface else "",
+                "ip":     orchestrator.selected_interface.ip    if orchestrator.selected_interface else "",
+                "type":   orchestrator.selected_interface.iface_type if orchestrator.selected_interface else "",
+            },
+            "arms": arms,
+        })
+
     @app.route("/api/interfaces")
     def api_interfaces():
         interfaces = get_interfaces()
