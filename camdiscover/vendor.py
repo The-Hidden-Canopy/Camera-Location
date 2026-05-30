@@ -248,7 +248,19 @@ def classify_device_type(
     hostname: str = "",
     camera_confidence: int = 0,
 ) -> DeviceTypeResult:
-    """Classify a discovered host into a generic network device type."""
+    """Classify a discovered host using ordered evidence tiers.
+
+    Resolution order (most specific/authoritative first):
+      1. Explicit infrastructure identity  — protect bridges, routers, switches
+      2. Explicit printer/endpoint identity
+      3. NVR identity
+      4. Confirmed camera protocol evidence (camera_confidence, NOT bare TCP 554)
+      5. Camera-port hint (554 present AND no strong non-camera signal)
+      6. Ambiguous network device / unknown
+
+    A device is never classified as a camera solely because TCP 554 is open —
+    infrastructure devices can expose port 554 for RTSP-based management.
+    """
     vendor_l = (vendor or "").lower()
     banner_l = (http_banner or "").lower()
     model_l = (model or "").lower()
@@ -261,31 +273,67 @@ def classify_device_type(
     endpoint_ports = {445, 3389}
     infra_ports = {22, 23, 53}
 
-    if any(token in joined for token in ("nvr", "dvr", "network video recorder", "digital video recorder")):
-        return DeviceTypeResult("nvr", 85, warn_reset=True)
+    # ── Tier 1: Explicit infrastructure ──────────────────────────────────────
+    # Checked before camera so a Ubiquiti radio exposing RTSP-like port 554
+    # doesn't get misclassified as a camera.  Uses "bridge" to match the
+    # protected-class set in seeds.WARN_RESET_CLASSES.
+    _INFRA_TOKENS = (
+        "ubiquiti", "unifi", "airmax", "nanobeam", "nanostation",
+        "mikrotik", "routerboard",
+        "cisco", "catalyst", "meraki",
+        "juniper", "aruba", "fortinet", "sophos", "pfsense", "opnsense",
+        "router", "gateway", "firewall",
+        "switch", "access point", "access_point",
+    )
+    if any(token in joined for token in _INFRA_TOKENS):
+        # Distinguish bridges (wireless uplinks) from routers/switches
+        if any(t in joined for t in ("bridge", "nanobeam", "nanostation", "airbridge", "airmax")):
+            return DeviceTypeResult("bridge", 82, warn_reset=True)
+        if any(t in joined for t in ("switch", "catalyst")):
+            return DeviceTypeResult("switch", 80, warn_reset=True)
+        if any(t in joined for t in ("router", "gateway", "firewall", "mikrotik", "fortinet",
+                                     "sophos", "pfsense", "opnsense")):
+            return DeviceTypeResult("router", 80, warn_reset=True)
+        return DeviceTypeResult("bridge", 76, warn_reset=True)   # generic infra
 
-    if camera_confidence >= 50 or port_set.intersection({554, 8554, 8899}):
-        return DeviceTypeResult("camera", max(camera_confidence, 70))
+    if port_set.intersection(infra_ports) and any(t in joined for t in (
+            "controller", "gateway", "router", "switch", "dns", "ap")):
+        return DeviceTypeResult("router", 72, warn_reset=True)
 
-    if port_set.intersection(printer_ports) or any(token in joined for token in ("printer", "laserjet", "deskjet", "xerox", "brother", "canon", "epson")):
+    # ── Tier 2: Printer / endpoint ────────────────────────────────────────────
+    if port_set.intersection(printer_ports) or any(t in joined for t in (
+            "printer", "laserjet", "deskjet", "xerox", "brother", "canon", "epson")):
         return DeviceTypeResult("printer", 80)
 
-    if any(token in joined for token in ("vmware", "hyper-v", "parallels", "virtualbox")):
-        return DeviceTypeResult("virtual_machine", 80)
+    if any(t in joined for t in ("vmware", "hyper-v", "parallels", "virtualbox")):
+        return DeviceTypeResult("server", 80, warn_reset=True)
 
-    if any(token in joined for token in ("ubiquiti", "router", "gateway", "firewall", "switch", "access point", "mikrotik", "cisco", "juniper", "aruba", "fortinet", "sophos", "unifi")):
-        return DeviceTypeResult("network_infrastructure", 78, warn_reset=True)
+    if port_set.intersection(endpoint_ports) and any(t in joined for t in (
+            "desktop", "laptop", "windows", "workstation")):
+        return DeviceTypeResult("server", 65, warn_reset=True)
 
-    if port_set.intersection(infra_ports) and any(token in joined for token in ("controller", "gateway", "router", "switch", "dns", "ap")):
-        return DeviceTypeResult("network_infrastructure", 72, warn_reset=True)
+    # ── Tier 3: NVR identity ──────────────────────────────────────────────────
+    if any(t in joined for t in ("nvr", "dvr", "network video recorder", "digital video recorder")):
+        return DeviceTypeResult("nvr", 85, warn_reset=True)
 
-    if port_set.intersection({22, 161, 162, 179, 443}) and any(token in joined for token in ("server", "nas", "synology", "qnap")):
+    if port_set.intersection({22, 161, 162, 179, 443}) and any(t in joined for t in (
+            "server", "nas", "synology", "qnap")):
         return DeviceTypeResult("server", 70, warn_reset=True)
 
-    if port_set.intersection(endpoint_ports) and any(token in joined for token in ("desktop", "laptop", "windows", "workstation")):
-        return DeviceTypeResult("endpoint", 65)
+    # ── Tier 4: Confirmed camera (protocol evidence) ──────────────────────────
+    # Require camera_confidence ≥ 50 — i.e. at least one strong camera protocol
+    # signal (ONVIF, RTSP DESCRIBE, SADP, Dahua, camera HTTP banner, etc.).
+    # Bare TCP 554 alone = only 12 points, insufficient.
+    if camera_confidence >= 50:
+        return DeviceTypeResult("camera", camera_confidence)
 
-    if vendor_l != "unknown" and vendor_l:
-        return DeviceTypeResult("network_device", 45)
+    # ── Tier 5: Camera-port hint — keep as candidate, not confirmed ───────────
+    # TCP 554/8554/8899 open but no strong protocol evidence yet.  Return camera
+    # with a low score so further probing can upgrade it.
+    if port_set.intersection({554, 8554, 8899}):
+        return DeviceTypeResult("camera", max(camera_confidence, 30))
+
+    if vendor_l not in ("unknown", ""):
+        return DeviceTypeResult("unknown", 45)
 
     return DeviceTypeResult("unknown", 15)
