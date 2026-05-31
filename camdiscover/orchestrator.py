@@ -129,6 +129,14 @@ class DiscoveryOrchestrator:
         # instead of once per camera × NVR (O(cameras × nvrs × endpoints × 4s)).
         self._nvr_channel_cache: Dict[str, set] = {}
 
+        # ── Secondary identity indexes ───────────────────────────────────────
+        # These allow _get_or_create to find an existing device by MAC address
+        # before falling back to IP lookup.  This prevents a device that moved
+        # from one IP to another from appearing as two separate records.
+        # Both maps are kept in sync whenever a device is added or its MAC set.
+        self._devices_by_mac: Dict[str, str] = {}   # normalised MAC → device_id
+        self._devices_by_id:  Dict[str, str] = {}   # device_id → current IP key
+
     @property
     def discovered_devices(self) -> List[DiscoveredDevice]:
         return list(self.devices.values())
@@ -155,17 +163,74 @@ class DiscoveryOrchestrator:
             except Exception:
                 pass
 
-    def _get_or_create(self, ip: str, method: str = "") -> DiscoveredDevice:
+    @staticmethod
+    def _normalise_mac(mac: str) -> str:
+        """Canonical lowercase colon-separated MAC for index keys."""
+        return mac.lower().replace("-", ":").strip() if mac else ""
+
+    def _register_device(self, device: DiscoveredDevice):
+        """Add or refresh both secondary indexes for a device."""
+        self._devices_by_id[device.device_id] = device.ip
+        if device.mac:
+            nm = self._normalise_mac(device.mac)
+            if nm:
+                self._devices_by_mac[nm] = device.device_id
+
+    def _get_or_create(self, ip: str, method: str = "",
+                       mac: str = "") -> DiscoveredDevice:
+        """Return an existing device for this IP (or MAC), creating one if needed.
+
+        Identity resolution order:
+          1. Same IP already in the dict → return it (fast path).
+          2. MAC provided and known → IP may have changed; update current IP
+             on the existing record and re-key it.
+          3. Neither found → create a fresh device.
+
+        This prevents a camera that moved from 192.168.88.34 to 10.32.57.118
+        from appearing as two unrelated records simply because the IP changed.
+        """
         new_device = None
         with self._devices_lock:
-            if ip not in self.devices:
-                device = DiscoveredDevice(ip=ip)
-                if method:
-                    device.discovery_methods.append(method)
-                self.devices[ip] = device
-                new_device = device   # remember to emit AFTER releasing lock
-        # Emit outside the lock so a callback that calls back into the
-        # orchestrator (e.g. triage_state, _get_or_create) can't deadlock.
+            # ── Fast path: IP already present ────────────────────────────
+            if ip in self.devices:
+                dev = self.devices[ip]
+                if method and method not in dev.discovery_methods:
+                    dev.discovery_methods.append(method)
+                if mac:
+                    nm = self._normalise_mac(mac)
+                    if nm and not dev.mac:
+                        dev.mac = mac
+                        self._devices_by_mac[nm] = dev.device_id
+                return dev
+
+            # ── MAC lookup: device moved to a new IP ──────────────────────
+            if mac:
+                nm = self._normalise_mac(mac)
+                dev_id = self._devices_by_mac.get(nm)
+                if dev_id:
+                    old_ip = self._devices_by_id.get(dev_id)
+                    dev = self.devices.get(old_ip) if old_ip else None
+                    if dev:
+                        # Re-key under the new IP; record old IP in history
+                        self.devices.pop(old_ip, None)
+                        dev.record_ip(ip)
+                        self.devices[ip] = dev
+                        self._devices_by_id[dev_id] = ip
+                        if method and method not in dev.discovery_methods:
+                            dev.discovery_methods.append(method)
+                        return dev
+
+            # ── Create new device ─────────────────────────────────────────
+            device = DiscoveredDevice(ip=ip)
+            if method:
+                device.discovery_methods.append(method)
+            if mac:
+                device.mac = mac
+            self.devices[ip] = device
+            self._register_device(device)
+            new_device = device
+
+        # Emit outside the lock to avoid re-entrant deadlocks.
         if new_device is not None:
             self._emit_device(new_device)
         return self.devices[ip]
@@ -246,6 +311,8 @@ class DiscoveryOrchestrator:
         """
         with self._devices_lock:
             self.devices.clear()
+            self._devices_by_mac.clear()
+            self._devices_by_id.clear()
 
         with self._triage_lock:
             self._known_scopes.clear()
@@ -686,8 +753,29 @@ class DiscoveryOrchestrator:
 
     def _run_triage(self, mode: str, custom_subnets: Optional[List[str]]):
         self._triage_running = True
-        # State was already wiped by _full_reset() in run().
-        # Just seed the scope list from what the interface actually has right now.
+
+        # ── Reset scan-progress state without wiping the evidence ledger ──
+        # When clear=False (the default for normal scan starts) _full_reset()
+        # is not called, so completed scopes stay completed and mismatch entries
+        # stay in terminal states from the prior run.  We reset scope completion
+        # and stale mismatch statuses here so every scan re-walks the known
+        # scope and re-checks previously unreachable devices — but we deliberately
+        # do NOT touch self.devices or its evidence.  The ledger is durable.
+        with self._triage_lock:
+            for s in self._known_scopes:
+                if s.completed:
+                    s.completed    = False
+                    s.next_host    = 1
+                    s.started_at   = None
+                    s.completed_at = None
+            for m in self._mismatch_q.values():
+                if m.status in ("dead_or_stale", "route_missing_retry_pending",
+                                "alive_wrong_subnet"):
+                    m.status   = "observed"
+                    m.attempts = 0
+        self._backoff.clear()
+        self._nvr_channel_cache.clear()
+
         self._seed_known_scopes(custom_subnets)
 
         # ONE bounded active discovery burst before the sequential walk.
@@ -1390,7 +1478,10 @@ class DiscoveryOrchestrator:
             return
         iface_ip = self.selected_interface.ip if self.selected_interface else ""
         self._dpi = DPICollector()
-        self._dpi.on_evidence = self._handle_passive_evidence
+        # DPI callback now includes sensor_id (7-arg form).
+        # The lambda unpacks all args so _handle_passive_evidence gets provenance.
+        self._dpi.on_evidence = lambda ip, kind, detail, source, weight, raw, sensor_id="": \
+            self._handle_passive_evidence(ip, kind, detail, source, weight, raw, sensor_id)
         self._dpi.start(iface_ip)
 
         # Gap 3: PassiveListener was instantiated but never wired — now it is.
@@ -1444,7 +1535,7 @@ class DiscoveryOrchestrator:
     })
 
     def _handle_passive_evidence(self, ip: str, kind: str, detail: str, source: str,
-                                 weight: int, raw: str):
+                                 weight: int, raw: str, sensor_id: str = ""):
         # Passive listening is continuous and must NOT probe; it only records
         # evidence and feeds the triage queues. The sequential worker decides
         # what (if anything) to actively check.
@@ -1465,7 +1556,8 @@ class DiscoveryOrchestrator:
         else:
             device = self._get_or_create(ip, "Passive-DPI")
 
-        self._record_evidence(device, kind, detail, source, raw=raw, weight=weight)
+        self._record_evidence(device, kind, detail, source, raw=raw, weight=weight,
+                              sensor_id=sensor_id)
 
         # Gap 4: IGMP Membership Report — raw = group IP, src = joining host.
         # Update MulticastGroup.listeners so the UI can show which hosts are
@@ -2251,13 +2343,30 @@ class DiscoveryOrchestrator:
         self._emit_device_updated(device)
 
     def _record_evidence(self, device: DiscoveredDevice, kind: str, detail: str, source: str,
-                         raw: str = "", weight: Optional[int] = None):
+                         raw: str = "", weight: Optional[int] = None,
+                         sensor_id: str = ""):
+        """Append an evidence item to the device ledger with full provenance.
+
+        Provenance fields are populated from the orchestrator's current
+        interface/capture-position so every evidence item carries the context
+        of where it was observed — not just what was observed.
+        """
+        iface_name  = self.selected_interface.name if self.selected_interface else ""
+        cap_pos     = self.capture_position.position if self.capture_position else "unknown"
+        vis_limit   = (
+            f"Observed from {cap_pos} via {iface_name}" if iface_name else
+            f"Observed from {cap_pos}"
+        )
         evidence = Evidence(
             kind=kind,
             detail=detail,
             source=source,
             weight=EVIDENCE_WEIGHTS.get(kind, 0) if weight is None else weight,
             raw=raw[:500] if raw else "",
+            sensor_id=sensor_id or source,
+            interface=iface_name,
+            capture_position=cap_pos,
+            visibility_limit=vis_limit,
         )
         if not device.add_evidence(evidence):
             return

@@ -410,12 +410,25 @@ class CapturePosition:
 
 @dataclass
 class DiscoveredDevice:
-    ip: str
+    # ── Primary identity ────────────────────────────────────────────────
+    # device_id is the stable internal key.  IP is a current observation,
+    # not a permanent identity — devices move, DHCP reassigns, APIPA
+    # addresses appear before recovery.  Never use IP as a join key across
+    # scan sessions; use device_id, mac, onvif_uuid, or serial instead.
+    device_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    ip: str = ""
+    ip_history: List[str] = field(default_factory=list)   # all IPs ever seen for this device
+
     mac: str = ""
+    mac_history: List[str] = field(default_factory=list)  # in case MAC changes (spoofing / NIC swap)
+    serial: str = ""        # from ONVIF GetDeviceInformation or SADP
+    onvif_uuid: str = ""    # from WS-Discovery MessageID or ONVIF endpoint UUID
+
     vendor: str = "Unknown"
     hostname: str = ""
     model: str = ""
     firmware: str = ""
+
     open_ports: List[int] = field(default_factory=list)
     protocols: List[str] = field(default_factory=list)
     onvif_status: str = "not-checked"   # found | error | not-checked
@@ -426,12 +439,16 @@ class DiscoveredDevice:
     subnet:     str = ""
     confidence: int = 0                  # legacy fingerprint score (keep for compat)
     discovery_methods: List[str] = field(default_factory=list)
+    first_seen: datetime = field(default_factory=datetime.now)
     last_seen: datetime = field(default_factory=datetime.now)
     raw_responses: Dict[str, str] = field(default_factory=dict)
 
-    # ── Evidence-based DPI ──────────────────────────────────────────────
-    # All signals (passive + active) collected as Evidence objects.
-    # Deduped by kind: only the first occurrence of each kind is kept.
+    # ── Append-only evidence ledger ─────────────────────────────────────
+    # All signals (passive + active) collected as Evidence objects with
+    # full provenance.  The ledger survives mode switches and scan restarts
+    # — only an explicit operator Clear wipes it.
+    # Deduped by kind: only the first occurrence of each kind is recorded;
+    # subsequent observations of the same kind update last_seen.
     evidence: List[Evidence] = field(default_factory=list)
 
     # Subnet mismatch: non-empty string = problem description
@@ -442,21 +459,25 @@ class DiscoveredDevice:
     subnet_zone: str = ""
 
     # ── Classification ──────────────────────────────────────────────────
-    # camera | nvr | server | bridge | router | switch | unknown
+    # camera | nvr | server | bridge | router | switch | printer | unknown
     device_class: str = "unknown"
 
     # True → show "do not reset" warning (bridges, routers, NVRs)
     warn_reset: bool = False
+
+    # reset_risk: none | low | moderate | high | critical
+    # Set by the classifier; unknown infrastructure defaults to "high"
+    # until a safe role is confirmed.
+    reset_risk: str = "unknown"
 
     # If the device appears to be targeting a gateway from a different
     # subnet (old static config), record that here.
     suspected_old_gateway: str = ""
 
     # Physical/PoE state from switch/NVR data
-    # See seeds.POE_STATES for valid values.
     poe_state: str = ""
 
-    # Human note from seed data or manual entry
+    # Human note from manual entry
     notes: str = ""
 
     # APIPA flag — set True if this device was seen with a 169.254.x.x address
@@ -469,20 +490,128 @@ class DiscoveredDevice:
     def __post_init__(self):
         # Per-device lock so concurrent fingerprint threads don't corrupt evidence list
         object.__setattr__(self, '_evidence_lock', threading.Lock())
+        # Record the initial IP in history if present
+        if self.ip and self.ip not in self.ip_history:
+            self.ip_history.append(self.ip)
 
-    # ── Computed properties ─────────────────────────────────────────────
+    def record_ip(self, ip: str):
+        """Record a new current IP, preserving history."""
+        if not ip:
+            return
+        self.ip = ip
+        if ip not in self.ip_history:
+            self.ip_history.append(ip)
+
+    # ── Multi-dimensional confidence lanes ──────────────────────────────
+    # Each lane is computed from a specific subset of evidence kinds so
+    # contradictory signals are preserved as tension rather than collapsed
+    # into a single number.
+
+    _PRESENCE_KINDS = frozenset({
+        "arp_seen", "router_arp_seen", "switch_mac_seen", "dhcp_lease_seen",
+        "dhcp_request", "dhcp_hostname_camera", "lldp_neighbor",
+        "ping_responded", "tcp_port_open",
+    })
+    _CAMERA_ROLE_KINDS = frozenset({
+        "onvif_probe_match_nvt", "onvif_probe_match_generic",
+        "onvif_device_service_url", "onvif_device_info", "onvif_port_responding",
+        "sadp_response", "dahua_udp_response",
+        "rtsp_describe_response", "rtsp_setup_play", "rtsp_port_open",
+        "http_camera_banner", "mac_oui_camera",
+        "nvr_channel_match", "nvr_channel_listed",
+        "igmp_multicast_stream", "rtp_flow", "rtp_media_flow",
+        "ssdp_camera_service", "mdns_camera_service",
+        "fingerprint_match",
+    })
+    _INFRA_ROLE_KINDS = frozenset({
+        "snmp_infra_hint", "wsd_non_camera", "windows_wsd_host",
+        "lldp_neighbor",
+    })
+    _REACHABILITY_KINDS = frozenset({
+        "ping_responded", "tcp_port_open", "rtsp_port_open",
+        "onvif_port_responding", "http_camera_banner",
+    })
+    _STREAM_KINDS = frozenset({
+        "rtsp_describe_response", "rtsp_setup_play", "rtp_flow",
+        "rtp_media_flow", "igmp_multicast_stream",
+    })
+    _MISMATCH_KINDS = frozenset({
+        "subnet_mismatch_visible", "gateway_mismatch",
+    })
+
+    @property
+    def physical_presence_confidence(self) -> int:
+        """How certain are we this device is physically connected right now?"""
+        total = sum(e.weight for e in self.evidence
+                    if e.kind in self._PRESENCE_KINDS and e.weight > 0)
+        # Ping and active TCP checks are strong presence signals
+        if any(e.kind == "ping_responded" for e in self.evidence):
+            total = max(total, 60)
+        return min(100, total)
+
+    @property
+    def camera_role_confidence(self) -> int:
+        """How strong is the evidence this device is a camera or NVR?"""
+        if not self.evidence:
+            return self.confidence
+        total = sum(e.weight for e in self.evidence
+                    if e.kind in self._CAMERA_ROLE_KINDS)
+        return max(0, min(100, total))
+
+    @property
+    def infrastructure_role_confidence(self) -> int:
+        """How strong is the evidence this device is network infrastructure?"""
+        total = sum(abs(e.weight) for e in self.evidence
+                    if e.kind in self._INFRA_ROLE_KINDS and e.weight < 0)
+        if self.device_class in ("bridge", "router", "switch"):
+            total = max(total, 70)
+        return min(100, total)
+
+    @property
+    def route_reachability_confidence(self) -> int:
+        """Can we actively reach this device from our current position?"""
+        if any(e.kind == "ping_responded" for e in self.evidence):
+            return 90
+        total = sum(e.weight for e in self.evidence
+                    if e.kind in self._REACHABILITY_KINDS and e.weight > 0)
+        return min(100, total)
+
+    @property
+    def stream_validation_confidence(self) -> int:
+        """Have we confirmed an actual media stream from this device?"""
+        total = sum(e.weight for e in self.evidence
+                    if e.kind in self._STREAM_KINDS and e.weight > 0)
+        return min(100, total)
+
+    @property
+    def configuration_mismatch_confidence(self) -> int:
+        """How strong is the evidence this device is misconfigured?"""
+        total = sum(abs(e.weight) for e in self.evidence
+                    if e.kind in self._MISMATCH_KINDS)
+        if self.subnet_mismatch:
+            total = max(total, 50)
+        if self.suspected_old_gateway:
+            total = max(total, 40)
+        return min(100, total)
 
     @property
     def camera_confidence(self) -> int:
-        """
-        Evidence-based camera confidence score (0-100).
-        Sum of all evidence weights, clamped.  This is the primary confidence
-        metric; the legacy `confidence` field is the fingerprint heuristic score.
-        """
-        if not self.evidence:
-            return self.confidence   # fall back to fingerprint score
-        total = sum(e.weight for e in self.evidence)
-        return max(0, min(100, total))
+        """Primary camera score — alias of camera_role_confidence.
+        Falls back to legacy fingerprint score when no evidence yet."""
+        return self.camera_role_confidence if self.evidence else self.confidence
+
+    @property
+    def effective_reset_risk(self) -> str:
+        """Derive reset risk from classification if not explicitly set."""
+        if self.reset_risk not in ("unknown", ""):
+            return self.reset_risk
+        if self.device_class in ("bridge", "router", "switch", "nvr", "server"):
+            return "high"
+        if self.warn_reset:
+            return "high"
+        if self.camera_role_confidence >= 70:
+            return "moderate"
+        return "low"
 
     @property
     def device_type(self) -> str:
@@ -501,11 +630,9 @@ class DiscoveredDevice:
         return 35
 
     def add_evidence(self, ev: Evidence) -> bool:
-        """
-        Add an Evidence item; returns True if it was new (not a duplicate kind).
-        Duplicate kinds are ignored so repeated observations don't inflate score.
-        Thread-safe: protected by per-device lock.
-        """
+        """Append to the evidence ledger. Returns True if the kind was new.
+        Duplicate kinds are not re-added — the ledger is append-only per kind.
+        Thread-safe: protected by the per-device lock."""
         lock = getattr(self, '_evidence_lock', None)
         if lock:
             with lock:
@@ -513,7 +640,6 @@ class DiscoveredDevice:
                     return False
                 self.evidence.append(ev)
                 return True
-        # fallback (shouldn't happen after __post_init__)
         if any(e.kind == ev.kind for e in self.evidence):
             return False
         self.evidence.append(ev)
@@ -544,8 +670,15 @@ class DiscoveredDevice:
 
     def to_dict(self) -> dict:
         return {
+            # ── Identity ──────────────────────────────────────────────
+            "device_id":         self.device_id,
             "ip":                self.ip,
+            "ip_history":        self.ip_history,
             "mac":               self.mac,
+            "mac_history":       self.mac_history,
+            "serial":            self.serial,
+            "onvif_uuid":        self.onvif_uuid,
+            # ── Descriptive ───────────────────────────────────────────
             "vendor":            self.vendor,
             "hostname":          self.hostname,
             "model":             self.model,
@@ -558,24 +691,35 @@ class DiscoveredDevice:
             "rtsp_url":          self.rtsp_url,
             "onvif_url":         self.onvif_url,
             "subnet":            self.subnet,
-            "confidence":        self.camera_confidence,   # primary score now
-            "fingerprint_score": self.confidence,          # legacy heuristic
             "discovery_methods": self.discovery_methods,
+            "first_seen":        self.first_seen.isoformat(),
             "last_seen":         self.last_seen.isoformat(),
+            # ── Multi-dimensional confidence ──────────────────────────
+            "confidence":                    self.camera_confidence,   # primary (backward compat)
+            "camera_role_confidence":        self.camera_role_confidence,
+            "physical_presence_confidence":  self.physical_presence_confidence,
+            "infrastructure_role_confidence":self.infrastructure_role_confidence,
+            "route_reachability_confidence": self.route_reachability_confidence,
+            "stream_validation_confidence":  self.stream_validation_confidence,
+            "configuration_mismatch_confidence": self.configuration_mismatch_confidence,
+            "fingerprint_score":             self.confidence,          # legacy heuristic
+            # ── Evidence ledger ───────────────────────────────────────
             "evidence":          [e.to_dict() for e in self.evidence],
-            "subnet_mismatch":   self.subnet_mismatch,
-            "dpi_stages":        {k: v.to_dict() for k, v in self.dpi_stages.items()},
-            "dpi_score":         self.dpi_score,
-            "dpi_summary":       self.dpi_summary,
-            "subnet_zone":       self.subnet_zone,
-            # classification
+            # ── Classification ────────────────────────────────────────
             "device_class":      self.device_class,
             "device_type":       self.device_type,
             "device_type_confidence": self.device_type_confidence,
             "warn_reset":        self.warn_reset,
+            "reset_risk":        self.effective_reset_risk,
             "suspected_old_gateway": self.suspected_old_gateway,
             "poe_state":         self.poe_state,
             "notes":             self.notes,
             "apipa_seen":        self.apipa_seen,
             "validation":        self.validation,
+            # ── DPI ───────────────────────────────────────────────────
+            "subnet_mismatch":   self.subnet_mismatch,
+            "dpi_stages":        {k: v.to_dict() for k, v in self.dpi_stages.items()},
+            "dpi_score":         self.dpi_score,
+            "dpi_summary":       self.dpi_summary,
+            "subnet_zone":       self.subnet_zone,
         }

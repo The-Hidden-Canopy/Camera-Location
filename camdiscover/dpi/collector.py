@@ -39,7 +39,23 @@ class DPICollector:
     Passive evidence collector.  Start it at the beginning of any scan mode;
     it runs in the background emitting Evidence signals as cameras announce
     themselves on the wire.
+
+    Every sensor arm reports its state so the operator knows exactly what
+    coverage is available.  A missing arm is reported as degraded coverage,
+    never silently dropped.  The arm states are exposed via get_capabilities().
     """
+
+    # Canonical arm names and their visibility contracts
+    ARM_VISIBILITY: dict = {
+        "onvif_wsdiscovery": "ONVIF ProbeMatch / Hello on UDP 3702 — local broadcast domain only",
+        "sadp":              "Hikvision SADP on UDP 37020 — local broadcast domain only",
+        "ssdp":              "SSDP/UPnP on UDP 1900 — local broadcast domain only",
+        "mdns":              "mDNS on UDP 5353 — link-local multicast only",
+        "dhcp":              "DHCP DISCOVER/REQUEST on UDP 67/68 — new leases only",
+        "igmp":              "IGMP Membership Reports via raw socket — requires admin, same L2 only",
+        "rtp_multicast":     "RTP streams on joined multicast groups — groups discovered via IGMP",
+        "lldp":              "LLDP frames via raw socket — requires admin, link-layer only",
+    }
 
     def __init__(self):
         self._running = False
@@ -47,10 +63,35 @@ class DPICollector:
         self._sockets: List[socket.socket] = []
         self._lock = threading.Lock()
 
-        # Callback signature:
-        #   on_evidence(ip: str, kind: str, detail: str, source: str,
-        #               weight: int, raw: str) -> None
+        # Callback:  on_evidence(ip, kind, detail, source, weight, raw, sensor_id)
         self.on_evidence: Optional[Callable] = None
+
+        # Per-arm health state — written by each listener thread, read by
+        # get_capabilities().  Values: "starting" | "active" | "failed" |
+        # "permission_denied" | "port_conflict" | "unsupported" | "waiting"
+        self._arm_state: dict = {arm: "starting" for arm in self.ARM_VISIBILITY}
+        self._arm_error: dict = {}   # arm → last error string if failed
+
+    # ─── Public: sensor health ────────────────────────────────────────────
+
+    def get_capabilities(self) -> dict:
+        """Return a snapshot of each arm's state and visibility contract.
+        Meant for the /api/capabilities endpoint so the UI can surface
+        coverage gaps rather than silently showing absent evidence.
+        """
+        result = {}
+        for arm, visibility in self.ARM_VISIBILITY.items():
+            result[arm] = {
+                "state":      self._arm_state.get(arm, "unknown"),
+                "visibility": visibility,
+                "error":      self._arm_error.get(arm, ""),
+            }
+        return result
+
+    def _set_arm(self, arm: str, state: str, error: str = ""):
+        self._arm_state[arm] = state
+        if error:
+            self._arm_error[arm] = error
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
@@ -58,18 +99,20 @@ class DPICollector:
         if self._running:
             return
         self._running = True
-        for fn in (
-            self._listen_onvif_wsdiscovery,
-            self._listen_sadp,
-            self._listen_ssdp,
-            self._listen_mdns,
-            self._listen_dhcp,
-            self._listen_igmp,          # Gap 4: IGMP membership reports (admin-only raw socket)
-            self._listen_rtp_multicast, # Gap 5: RTP streams on known camera multicast groups
-            self._listen_lldp,          # Gap 6: LLDP neighbor announcements (admin-only raw socket)
-        ):
+        arm_map = {
+            self._listen_onvif_wsdiscovery: "onvif_wsdiscovery",
+            self._listen_sadp:              "sadp",
+            self._listen_ssdp:              "ssdp",
+            self._listen_mdns:              "mdns",
+            self._listen_dhcp:              "dhcp",
+            self._listen_igmp:              "igmp",
+            self._listen_rtp_multicast:     "rtp_multicast",
+            self._listen_lldp:              "lldp",
+        }
+        for fn, arm in arm_map.items():
+            self._set_arm(arm, "starting")
             t = threading.Thread(target=fn, args=(interface_ip,), daemon=True,
-                                 name=f"dpi-{fn.__name__}")
+                                 name=f"dpi-{arm}")
             t.start()
             self._threads.append(t)
 
@@ -85,12 +128,15 @@ class DPICollector:
 
     # ─── Emit helper ──────────────────────────────────────────────────────
 
-    def _emit(self, ip: str, kind: str, detail: str, source: str, raw: str = ""):
+    def _emit(self, ip: str, kind: str, detail: str, source: str,
+              raw: str = "", sensor_id: str = ""):
+        """Fire the evidence callback.  sensor_id is the ARM_VISIBILITY key
+        so the orchestrator can embed it in the Evidence provenance."""
         if not ip or not self.on_evidence:
             return
         weight = EVIDENCE_WEIGHTS.get(kind, 0)
         try:
-            self.on_evidence(ip, kind, detail, source, weight, raw)
+            self.on_evidence(ip, kind, detail, source, weight, raw, sensor_id)
         except Exception:
             pass
 
@@ -123,17 +169,20 @@ class DPICollector:
         Listen on multicast 239.255.255.250:3702 for ONVIF Probe/Hello/ProbeMatch.
         Cameras announce themselves here on start-up and in response to probes.
         """
+        ARM = "onvif_wsdiscovery"
         MCAST, PORT = "239.255.255.250", 3702
         try:
             s = self._udp_socket()
             try:
                 s.bind(("", PORT))
-            except OSError:
+            except OSError as e:
                 s.close()
+                self._set_arm(ARM, "port_conflict", str(e))
                 return   # port in use — PassiveListener already there
             self._join_multicast(s, MCAST, iface_ip)
             s.settimeout(1.0)
             self._track(s)
+            self._set_arm(ARM, "active")
 
             while self._running:
                 try:
@@ -146,8 +195,11 @@ class DPICollector:
                     continue
                 except OSError:
                     break
-        except Exception:
-            pass
+            self._set_arm(ARM, "failed", "socket closed")
+        except PermissionError as e:
+            self._set_arm(ARM, "permission_denied", str(e))
+        except Exception as e:
+            self._set_arm(ARM, "failed", str(e))
 
     def _parse_wsdiscovery(self, ip: str, data: bytes):
         try:
@@ -210,25 +262,27 @@ class DPICollector:
         Listen on broadcast UDP 37020 for Hikvision SADP responses.
         Also sends a probe so cameras respond immediately.
         """
+        ARM = "sadp"
         PORT = 37020
         try:
             s = self._udp_socket()
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             try:
                 s.bind(("", PORT))
-            except OSError:
+            except OSError as e:
                 s.close()
+                self._set_arm(ARM, "port_conflict", str(e))
                 return
             s.settimeout(1.0)
             self._track(s)
 
             # Send SADP inquiry probe
             try:
-                # Minimal SADP inquiry packet (16 zero bytes triggers response)
                 s.sendto(b'\x20' + b'\x00' * 15, ("255.255.255.255", PORT))
             except Exception:
                 pass
 
+            self._set_arm(ARM, "active")
             while self._running:
                 try:
                     data, addr = s.recvfrom(65535)
@@ -238,8 +292,11 @@ class DPICollector:
                     continue
                 except OSError:
                     break
-        except Exception:
-            pass
+            self._set_arm(ARM, "failed", "socket closed")
+        except PermissionError as e:
+            self._set_arm(ARM, "permission_denied", str(e))
+        except Exception as e:
+            self._set_arm(ARM, "failed", str(e))
 
     def _parse_sadp(self, ip: str, data: bytes):
         if len(data) < 8:
@@ -281,17 +338,20 @@ class DPICollector:
     # ─── SSDP / UPnP — UDP 1900 ───────────────────────────────────────────
 
     def _listen_ssdp(self, iface_ip: str):
+        ARM = "ssdp"
         MCAST, PORT = "239.255.255.250", 1900
         try:
             s = self._udp_socket()
             try:
                 s.bind(("", PORT))
-            except OSError:
+            except OSError as e:
                 s.close()
+                self._set_arm(ARM, "port_conflict", str(e))
                 return
             self._join_multicast(s, MCAST, iface_ip)
             s.settimeout(1.0)
             self._track(s)
+            self._set_arm(ARM, "active")
 
             while self._running:
                 try:
@@ -304,8 +364,11 @@ class DPICollector:
                     continue
                 except OSError:
                     break
-        except Exception:
-            pass
+            self._set_arm(ARM, "failed", "socket closed")
+        except PermissionError as e:
+            self._set_arm(ARM, "permission_denied", str(e))
+        except Exception as e:
+            self._set_arm(ARM, "failed", str(e))
 
     def _parse_ssdp(self, ip: str, data: bytes):
         try:
@@ -339,17 +402,20 @@ class DPICollector:
     # ─── mDNS — UDP 5353 ──────────────────────────────────────────────────
 
     def _listen_mdns(self, iface_ip: str):
+        ARM = "mdns"
         MCAST, PORT = "224.0.0.251", 5353
         try:
             s = self._udp_socket()
             try:
                 s.bind(("", PORT))
-            except OSError:
+            except OSError as e:
                 s.close()
+                self._set_arm(ARM, "port_conflict", str(e))
                 return
             self._join_multicast(s, MCAST, iface_ip)
             s.settimeout(1.0)
             self._track(s)
+            self._set_arm(ARM, "active")
 
             while self._running:
                 try:
@@ -362,8 +428,11 @@ class DPICollector:
                     continue
                 except OSError:
                     break
-        except Exception:
-            pass
+            self._set_arm(ARM, "failed", "socket closed")
+        except PermissionError as e:
+            self._set_arm(ARM, "permission_denied", str(e))
+        except Exception as e:
+            self._set_arm(ARM, "failed", str(e))
 
     def _parse_mdns(self, ip: str, data: bytes):
         # DNS is binary; scan for recognisable ASCII camera strings
@@ -394,11 +463,10 @@ class DPICollector:
     #   Options start at byte 236; option 12 = Hostname, option 60 = Vendor class.
 
     def _listen_dhcp(self, iface_ip: str):
-        # DHCP client port 68 is typically owned by the OS DHCP client service
-        # on Windows. We try binding to it first; if that fails (it usually does
-        # on Windows), we fall back to binding to the DHCP server port 67 with
-        # broadcast enabled. On port 67 we can see DHCP requests (DISCOVER/REQUEST)
-        # broadcast from clients even though we're not actually a DHCP server.
+        ARM = "dhcp"
+        # Try port 68 first (client port); fall back to 67 (server port).
+        # Either can fail on Windows without admin.
+        last_err = ""
         for PORT in (68, 67):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -406,11 +474,13 @@ class DPICollector:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                 try:
                     s.bind(("", PORT))
-                except OSError:
+                except OSError as e:
                     s.close()
-                    continue  # try next port
+                    last_err = str(e)
+                    continue
                 s.settimeout(1.0)
                 self._track(s)
+                self._set_arm(ARM, "active")
 
                 while self._running:
                     try:
@@ -421,8 +491,11 @@ class DPICollector:
                     except OSError:
                         break
                 return
-            except Exception:
-                pass
+            except PermissionError as e:
+                last_err = str(e)
+            except Exception as e:
+                last_err = str(e)
+        self._set_arm(ARM, "permission_denied" if "denied" in last_err.lower() else "failed", last_err)
 
     def _parse_dhcp(self, data: bytes, addr):
         """Parse a DHCP packet for hostname and vendor class strings."""
@@ -505,8 +578,9 @@ class DPICollector:
 
     def _listen_igmp(self, iface_ip: str):
         """Raw IGMP socket — captures v1/v2 Membership Reports.
-        Silently skipped if not running as administrator."""
-        IGMP_PROTO = 2  # socket.IPPROTO_IGMP
+        Reports permission_denied to capabilities if not running as admin."""
+        ARM = "igmp"
+        IGMP_PROTO = 2
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_RAW, IGMP_PROTO)
             try:
@@ -517,15 +591,15 @@ class DPICollector:
                 try:
                     s.bind((iface_ip, 0))
                 except OSError:
-                    pass  # bind error is non-fatal; we still receive on all IFs
+                    pass
             s.settimeout(1.0)
             self._track(s)
+            self._set_arm(ARM, "active")
 
             while self._running:
                 try:
                     data, addr = s.recvfrom(65535)
                     src_ip = addr[0]
-                    # Skip packets from multicast/broadcast addresses
                     if src_ip.startswith(("224.", "239.", "234.", "255.")):
                         continue
                     self._parse_igmp(src_ip, data)
@@ -533,8 +607,11 @@ class DPICollector:
                     continue
                 except OSError:
                     break
-        except Exception:
-            pass  # PermissionError on Windows without admin — skip silently
+            self._set_arm(ARM, "failed", "socket closed")
+        except PermissionError as e:
+            self._set_arm(ARM, "permission_denied", str(e))
+        except Exception as e:
+            self._set_arm(ARM, "failed", str(e))
 
     def _parse_igmp(self, src_ip: str, data: bytes):
         """Parse a raw IP packet containing an IGMP v1/v2 Membership Report.
@@ -580,12 +657,15 @@ class DPICollector:
     def _listen_rtp_multicast(self, iface_ip: str):
         """RTP group listener — starts with no groups; groups are added at
         runtime via join_rtp_group() as IGMP membership reports reveal them."""
-        self._rtp_sockets: dict = {}   # group -> socket
+        ARM = "rtp_multicast"
+        self._rtp_sockets: dict = {}
         self._rtp_iface_ip = iface_ip
-        # Thread just keeps running so join_rtp_group() calls have a live context.
-        # Actual receive happens in the same thread via a tight poll loop.
+        self._set_arm(ARM, "waiting")   # waiting for IGMP to reveal groups
+
         while self._running:
             groups = list(self._rtp_sockets.items())
+            if groups:
+                self._set_arm(ARM, "active")
             for group, s in groups:
                 try:
                     data, addr = s.recvfrom(4096)
@@ -595,7 +675,8 @@ class DPICollector:
                     if self._is_rtp(data):
                         detail = (f"RTP media flow: {src_ip} → multicast {group} "
                                   f"(PT={data[1] & 0x7F})")
-                        self._emit(src_ip, "rtp_flow", detail, "passive_rtp", group)
+                        self._emit(src_ip, "rtp_flow", detail, "passive_rtp", group,
+                                   sensor_id=ARM)
                 except socket.timeout:
                     continue
                 except OSError:
@@ -658,7 +739,9 @@ class DPICollector:
     LLDP_ETHERTYPE = 0x88cc
 
     def _listen_lldp(self, iface_ip: str):
-        """Raw socket listener for LLDP frames (admin-only, silent skip)."""
+        """Raw socket listener for LLDP frames.
+        Reports permission_denied to capabilities if not running as admin."""
+        ARM = "lldp"
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -667,29 +750,29 @@ class DPICollector:
                     s.bind((iface_ip, 0))
                 except OSError:
                     pass
-            # Enable promiscuous mode to catch LLDP multicast frames
             try:
                 s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
             except Exception:
                 pass
             s.settimeout(1.0)
             self._track(s)
+            self._set_arm(ARM, "active")
 
             while self._running:
                 try:
                     data, addr = s.recvfrom(65535)
                     if len(data) < 14:
                         continue
-                    # Check for LLDP EtherType in the Ethernet header
-                    # On Windows raw sockets, the IP header is included;
-                    # we need to scan for the LLDP pattern in the payload.
                     self._parse_lldp_scan(data, addr[0])
                 except socket.timeout:
                     continue
                 except OSError:
                     break
-        except Exception:
-            pass  # PermissionError on Windows without admin — skip silently
+            self._set_arm(ARM, "failed", "socket closed")
+        except PermissionError as e:
+            self._set_arm(ARM, "permission_denied", str(e))
+        except Exception as e:
+            self._set_arm(ARM, "failed", str(e))
 
     def _parse_lldp_scan(self, data: bytes, src_ip: str):
         """Scan raw packet data for LLDP signatures.
