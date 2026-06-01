@@ -1,6 +1,10 @@
 # STOP BEFORE TOUCHING THIS REPOSITORY
 
-Read this file before modifying discovery logic, subnet scanning, ARP handling, ONVIF or SADP probes, location records, device remediation, or operator verification workflows.
+## Required First Read
+
+Read [`PROJECT_INTENT.md`](PROJECT_INTENT.md) before modifying discovery logic, subnet scanning, ARP handling, ONVIF or SADP probes, location records, device remediation, or operator verification workflows.
+
+For portfolio crossover changes, also read the [Portfolio Contract Packet](https://github.com/GB-THC/IDA-TRAIN-V2/blob/main/PORTFOLIO_CONTRACT_PACKET.md) and [Deep Intent](https://github.com/GB-THC/IDA-TRAIN-V2/blob/main/DEEP_INTENT.md).
 
 ## Project Intent
 
