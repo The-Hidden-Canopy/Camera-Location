@@ -633,6 +633,10 @@
     // Export
     on(exportCsv, 'click', () => window.open('/api/export/csv', '_blank'));
     on(exportJson, 'click', () => window.open('/api/export/json', '_blank'));
+    const exportHtml = $('#export-html');
+    if (exportHtml) {
+      on(exportHtml, 'click', () => window.open('/api/export/html', '_blank'));
+    }
 
     // Search
     on(searchInput, 'input', debounce(renderTable, 200));
@@ -1212,7 +1216,8 @@
         ['Type Confidence', `${device.device_type_confidence != null ? device.device_type_confidence : 0}%`],
         ['Model', device.model || '\u2014'],
         ['Hostname', device.hostname || '\u2014'],
-        ['Firmware', device.firmware || '\u2014'],
+        ['Firmware', device.firmware || '—'],
+        ['Why this class', device.classification_rationale || '—'],
         ...(device.notes ? [['Notes', esc(device.notes)]] : []),
       ]
     });

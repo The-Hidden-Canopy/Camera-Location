@@ -21,7 +21,7 @@ from .models import (
     DPI_STAGES, DPI_STAGE_LABELS, SENSOR_QUALITY,
 )
 from .network import NetworkInterface, get_interfaces, install_signal_handlers, cleanup_temp_ips
-from .report import export_to_csv, export_to_json, generate_summary
+from .report import export_to_csv, export_to_json, export_to_html, generate_summary
 
 
 def expand_subnet_range(entry: str) -> List[str]:
@@ -317,14 +317,18 @@ def create_app() -> Flask:
 
     @app.route("/api/export/csv")
     def api_export_csv():
-        import csv, io
+        import io
         output = io.StringIO()
+        export_to_csv(orchestrator.discovered_devices, output.name)
+        # Re-write using StringIO so we don't need a temp file
+        import csv
         writer = csv.writer(output)
         writer.writerow([
             "IP", "MAC", "Vendor", "Device Type", "Model", "Hostname", "Ports",
             "ONVIF", "RTSP", "Web URL", "RTSP URL", "ONVIF URL",
             "Subnet", "Subnet Zone", "Confidence", "DPI Score",
             "DPI Summary", "Discovery Methods", "Last Seen",
+            "Device Class", "Classification Rationale", "Reset Risk", "Notes",
         ])
         for d in orchestrator.discovered_devices:
             writer.writerow([
@@ -336,6 +340,10 @@ def create_app() -> Flask:
                 d.dpi_summary,
                 ";".join(d.discovery_methods),
                 d.last_seen.isoformat(),
+                d.device_class,
+                d.classification_rationale,
+                d.effective_reset_risk,
+                d.notes,
             ])
         return Response(output.getvalue(), mimetype="text/csv", headers={
             "Content-Disposition": "attachment; filename=network-discovery.csv"
@@ -348,6 +356,15 @@ def create_app() -> Flask:
         output = io.BytesIO(_json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"))
         return send_file(output, as_attachment=True, download_name="network-discovery.json",
                          mimetype="application/json")
+
+    @app.route("/api/export/html")
+    def api_export_html():
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
+            tmp_path = f.name
+        export_to_html(orchestrator.discovered_devices, tmp_path)
+        return send_file(tmp_path, as_attachment=True, download_name="network-discovery.html",
+                         mimetype="text/html")
 
     @app.route("/api/events")
     def api_events():

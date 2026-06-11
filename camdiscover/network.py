@@ -318,6 +318,8 @@ _PING_FAILURE_PHRASES = (
     "could not find host",
     "ping request could not find",
     "host unreachable",
+    "ttl expired in transit",
+    "time exceeded",
 )
 
 def ping_host(ip: str, timeout: int = 2000) -> bool:
@@ -340,6 +342,13 @@ def ping_host(ip: str, timeout: int = 2000) -> bool:
         # Reject gateway-generated failure messages
         if any(phrase in out for phrase in _PING_FAILURE_PHRASES):
             return False
+        # Extra guard: if the reply is from a different IP than the target,
+        # it's a gateway-generated ICMP error (e.g. TTL exceeded, unreachable)
+        reply_from_m = re.search(r"reply from\s+(\d+\.\d+\.\d+\.\d+)", out)
+        if reply_from_m:
+            reply_from_ip = reply_from_m.group(1)
+            if reply_from_ip != ip:
+                return False
         return True
     except Exception:
         return False
@@ -370,10 +379,18 @@ def remove_temp_ip(interface_name: str, ip: str) -> bool:
     return ok
 
 
-def ip_to_subnet(ip: str) -> str:
-    """Get the /24 subnet for an IP."""
-    parts = ip.split(".")
-    return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+def ip_to_subnet(ip: str, prefix: int = 24) -> str:
+    """Get the subnet for an IP with the given prefix length (default /24).
+
+    Accepts an optional prefix so callers that know the real netmask can
+    produce the correct CIDR instead of hardcoding /24.
+    """
+    try:
+        net = ipaddress.IPv4Network(f"{ip}/{prefix}", strict=False)
+        return str(net)
+    except Exception:
+        parts = ip.split(".")
+        return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
 
 
 # ─── Subnet Zone Management ───────────────────────────────────────────

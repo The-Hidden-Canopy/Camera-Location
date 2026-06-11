@@ -120,6 +120,11 @@ class DeviceTypeResult:
     device_type: str
     confidence: int
     warn_reset: bool = False
+    rationale: str = ""
+
+
+def _rationale(tier: int, reason: str) -> str:
+    return f"Tier {tier}: {reason}"
 
 
 def fingerprint_device(
@@ -288,52 +293,66 @@ def classify_device_type(
     if any(token in joined for token in _INFRA_TOKENS):
         # Distinguish bridges (wireless uplinks) from routers/switches
         if any(t in joined for t in ("bridge", "nanobeam", "nanostation", "airbridge", "airmax")):
-            return DeviceTypeResult("bridge", 82, warn_reset=True)
+            return DeviceTypeResult("bridge", 82, warn_reset=True,
+                                    rationale=_rationale(1, "infra keyword match (bridge)"))
         if any(t in joined for t in ("switch", "catalyst")):
-            return DeviceTypeResult("switch", 80, warn_reset=True)
+            return DeviceTypeResult("switch", 80, warn_reset=True,
+                                    rationale=_rationale(1, "infra keyword match (switch)"))
         if any(t in joined for t in ("router", "gateway", "firewall", "mikrotik", "fortinet",
                                      "sophos", "pfsense", "opnsense")):
-            return DeviceTypeResult("router", 80, warn_reset=True)
-        return DeviceTypeResult("bridge", 76, warn_reset=True)   # generic infra
+            return DeviceTypeResult("router", 80, warn_reset=True,
+                                    rationale=_rationale(1, "infra keyword match (router/gateway)"))
+        return DeviceTypeResult("bridge", 76, warn_reset=True,
+                                rationale=_rationale(1, "infra keyword match (generic)"))
 
     if port_set.intersection(infra_ports) and any(t in joined for t in (
             "controller", "gateway", "router", "switch", "dns", "ap")):
-        return DeviceTypeResult("router", 72, warn_reset=True)
+        return DeviceTypeResult("router", 72, warn_reset=True,
+                                rationale=_rationale(1, "infra ports + keyword"))
 
     # ── Tier 2: Printer / endpoint ────────────────────────────────────────────
     if port_set.intersection(printer_ports) or any(t in joined for t in (
             "printer", "laserjet", "deskjet", "xerox", "brother", "canon", "epson")):
-        return DeviceTypeResult("printer", 80)
+        return DeviceTypeResult("printer", 80,
+                                rationale=_rationale(2, "printer ports or keyword"))
 
     if any(t in joined for t in ("vmware", "hyper-v", "parallels", "virtualbox")):
-        return DeviceTypeResult("server", 80, warn_reset=True)
+        return DeviceTypeResult("server", 80, warn_reset=True,
+                                rationale=_rationale(2, "virtualisation keyword"))
 
     if port_set.intersection(endpoint_ports) and any(t in joined for t in (
             "desktop", "laptop", "windows", "workstation")):
-        return DeviceTypeResult("server", 65, warn_reset=True)
+        return DeviceTypeResult("server", 65, warn_reset=True,
+                                rationale=_rationale(2, "endpoint ports + keyword"))
 
     # ── Tier 3: NVR identity ──────────────────────────────────────────────────
     if any(t in joined for t in ("nvr", "dvr", "network video recorder", "digital video recorder")):
-        return DeviceTypeResult("nvr", 85, warn_reset=True)
+        return DeviceTypeResult("nvr", 85, warn_reset=True,
+                                rationale=_rationale(3, "NVR/DVR keyword"))
 
     if port_set.intersection({22, 161, 162, 179, 443}) and any(t in joined for t in (
             "server", "nas", "synology", "qnap")):
-        return DeviceTypeResult("server", 70, warn_reset=True)
+        return DeviceTypeResult("server", 70, warn_reset=True,
+                                rationale=_rationale(3, "server/NAS ports + keyword"))
 
     # ── Tier 4: Confirmed camera (protocol evidence) ──────────────────────────
     # Require camera_confidence ≥ 50 — i.e. at least one strong camera protocol
     # signal (ONVIF, RTSP DESCRIBE, SADP, Dahua, camera HTTP banner, etc.).
     # Bare TCP 554 alone = only 12 points, insufficient.
     if camera_confidence >= 50:
-        return DeviceTypeResult("camera", camera_confidence)
+        return DeviceTypeResult("camera", camera_confidence,
+                                rationale=_rationale(4, f"camera_confidence={camera_confidence} ≥ 50"))
 
     # ── Tier 5: Camera-port hint — keep as candidate, not confirmed ───────────
     # TCP 554/8554/8899 open but no strong protocol evidence yet.  Return camera
     # with a low score so further probing can upgrade it.
     if port_set.intersection({554, 8554, 8899}):
-        return DeviceTypeResult("camera", max(camera_confidence, 30))
+        return DeviceTypeResult("camera", max(camera_confidence, 30),
+                                rationale=_rationale(5, "camera ports open (554/8554/8899) but no strong protocol evidence"))
 
     if vendor_l not in ("unknown", ""):
-        return DeviceTypeResult("unknown", 45)
+        return DeviceTypeResult("unknown", 45,
+                                rationale=_rationale(6, f"vendor={vendor_l} but no matching rule"))
 
-    return DeviceTypeResult("unknown", 15)
+    return DeviceTypeResult("unknown", 15,
+                            rationale=_rationale(6, "no distinguishing evidence"))

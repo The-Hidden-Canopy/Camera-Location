@@ -487,6 +487,9 @@ class DiscoveredDevice:
     # Each key maps to "pass" | "fail" | "unknown"
     validation: Dict[str, str] = field(default_factory=dict)
 
+    # Human-readable explanation of why this classification was chosen
+    classification_rationale: str = ""
+
     def __post_init__(self):
         # Per-device lock so concurrent fingerprint threads don't corrupt evidence list
         object.__setattr__(self, '_evidence_lock', threading.Lock())
@@ -716,6 +719,7 @@ class DiscoveredDevice:
             "notes":             self.notes,
             "apipa_seen":        self.apipa_seen,
             "validation":        self.validation,
+            "classification_rationale": self.classification_rationale,
             # ── DPI ───────────────────────────────────────────────────
             "subnet_mismatch":   self.subnet_mismatch,
             "dpi_stages":        {k: v.to_dict() for k, v in self.dpi_stages.items()},

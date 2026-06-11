@@ -112,9 +112,16 @@ class DiscoveryOrchestrator:
         # completes. cleanup_temp_ips() is the crash/stop safety net.
         self._scope_temp_ip: Dict[str, str] = {}
 
-        # Auto-detect capture position from interface type
-        self._capture_position_manual = False   # True once operator sets it explicitly
-        self._auto_detect_capture_position()
+        # ── Rate limiting / concurrency guard ───────────────────────────────
+        # Inter-host delay (seconds) between sequential probes so the scanner
+        # never overwhelms the local machine or the target network.
+        self._probe_delay: float = 0.05          # 50 ms default
+        # Maximum hosts to probe in a single scan session (safety cap).
+        self._probe_budget: int = 5000
+        self._probes_consumed: int = 0
+        # Minimum prefix length for auto-scanned subnets (/20 = 4094 hosts).
+        # Anything larger is rejected unless explicitly provided by the operator.
+        self._max_subnet_prefix: int = 20
 
         # ── Credential store (Gap 7) ────────────────────────────────────────
         # ip -> {username, password} — populated by webapp.py when the operator
@@ -136,6 +143,10 @@ class DiscoveryOrchestrator:
         # Both maps are kept in sync whenever a device is added or its MAC set.
         self._devices_by_mac: Dict[str, str] = {}   # normalised MAC → device_id
         self._devices_by_id:  Dict[str, str] = {}   # device_id → current IP key
+
+        # Auto-detect capture position from interface type
+        self._capture_position_manual = False   # True once operator sets it explicitly
+        self._auto_detect_capture_position()
 
     @property
     def discovered_devices(self) -> List[DiscoveredDevice]:
@@ -327,6 +338,7 @@ class DiscoveryOrchestrator:
         self._nvr_channel_cache.clear()
         self._scope_temp_ip.clear()
         self._triage_running = False
+        self._probes_consumed = 0
 
     # ─── Mode dispatch ────────────────────────────────────────────────
 
@@ -773,8 +785,11 @@ class DiscoveryOrchestrator:
                                 "alive_wrong_subnet"):
                     m.status   = "observed"
                     m.attempts = 0
-        self._backoff.clear()
+        # Backoff state is intentionally preserved when clear=False so that
+        # devices with 2 prior failures are not given a fresh 3-attempt budget
+        # on every mode switch.  Only clear the ephemeral caches.
         self._nvr_channel_cache.clear()
+        self._probes_consumed = 0
 
         self._seed_known_scopes(custom_subnets)
 
@@ -883,56 +898,119 @@ class DiscoveryOrchestrator:
 
     # ── P1: known scope walk, ONE host at a time ────────────────────────
 
+    def _consume_probe_budget(self, count: int = 1) -> bool:
+        """Return True if the budget still allows `count` probes."""
+        if self._probes_consumed + count > self._probe_budget:
+            return False
+        self._probes_consumed += count
+        return True
+
     def _tick_known_scope(self) -> bool:
         with self._triage_lock:
             cursor = next((s for s in self._known_scopes if not s.completed), None)
         if not cursor:
             return False
 
-        base = ".".join(cursor.cidr.split(".")[:3])
-        if cursor.started_at is None:
-            cursor.started_at = _dt.datetime.now()
-            # First host of this scope. If the interface has no IP on this
-            # subnet (promoted/manual foreign net), add ONE temporary
-            # secondary IP so the walk can actually reach it. Sequential —
-            # only the scope currently being walked ever gets a temp IP.
-            iface_name = (self.selected_interface.name
-                          if self.selected_interface else "")
-            if (iface_name and cursor.cidr not in self._scope_temp_ip
-                    and not self._has_local_ip_for_subnet(cursor.cidr)):
-                cand = f"{base}.200"
+        # ── Subnet-size guardrail ─────────────────────────────────────────
+        # Reject auto-scanning subnets larger than the configured maximum
+        # (/20 = 4094 hosts).  The operator can still add them manually.
+        try:
+            net = ipaddress.IPv4Network(cursor.cidr, strict=False)
+            if net.prefixlen < self._max_subnet_prefix:
                 self._set_task(
-                    f"P1 {cursor.cidr} is off-link — adding {cand}...",
-                    "triage")
-                try:
-                    if add_secondary_ip(iface_name, cand):
-                        self._scope_temp_ip[cursor.cidr] = cand
-                        time.sleep(0.5)   # let Windows register the address
-                except Exception:
-                    pass
+                    f"P1 SKIP {cursor.cidr}: too large for auto-scan "
+                    f"(/{net.prefixlen} > /{self._max_subnet_prefix})", "triage")
+                cursor.completed = True
+                cursor.completed_at = _dt.datetime.now()
+                return True
+        except Exception:
+            pass
 
-        host = cursor.next_host
-        ip = f"{base}.{host}"
-
-        # Advance cursor first so a crash/stop resumes at the next host.
-        cursor.next_host = host + 1
-        if cursor.next_host > 254:
+        # ── Budget guard ──────────────────────────────────────────────────
+        if not self._consume_probe_budget(1):
+            self._set_task(
+                f"P1 PAUSE {cursor.cidr}: probe budget exhausted "
+                f"({self._probes_consumed}/{self._probe_budget})", "triage")
             cursor.completed = True
             cursor.completed_at = _dt.datetime.now()
-            # Scope finished — remove its temporary IP immediately (the
-            # global cleanup_temp_ips() in run()/stop() is the safety net).
-            temp = self._scope_temp_ip.pop(cursor.cidr, None)
-            if temp and self.selected_interface:
-                try:
-                    remove_secondary_ip(self.selected_interface.name, temp)
-                except Exception:
-                    pass
+            return True
+
+        # ── Rate-limiting pause between hosts ─────────────────────────────
+        if self._probe_delay > 0:
+            time.sleep(self._probe_delay)
+
+        # ── Arbitrary-CIDR scope walk ─────────────────────────────────────
+        # Instead of hardcoding /24 and host octet 1..254, parse the real CIDR
+        # and walk its host addresses sequentially.
+        try:
+            net = ipaddress.IPv4Network(cursor.cidr, strict=False)
+            hosts = list(net.hosts())
+        except Exception:
+            # Fallback to legacy /24 behaviour if the CIDR is malformed
+            net = None
+            hosts = []
+
+        if net and hosts:
+            host_idx = cursor.next_host - 1
+            if host_idx < 0 or host_idx >= len(hosts):
+                cursor.completed = True
+                cursor.completed_at = _dt.datetime.now()
+                temp = self._scope_temp_ip.pop(cursor.cidr, None)
+                if temp and self.selected_interface:
+                    try:
+                        remove_secondary_ip(self.selected_interface.name, temp)
+                    except Exception:
+                        pass
+                return True
+            ip = str(hosts[host_idx])
+            cursor.next_host = host_idx + 2
+            if cursor.next_host > len(hosts):
+                cursor.completed = True
+                cursor.completed_at = _dt.datetime.now()
+                temp = self._scope_temp_ip.pop(cursor.cidr, None)
+                if temp and self.selected_interface:
+                    try:
+                        remove_secondary_ip(self.selected_interface.name, temp)
+                    except Exception:
+                        pass
+        else:
+            base = ".".join(cursor.cidr.split(".")[:3])
+            if cursor.started_at is None:
+                cursor.started_at = _dt.datetime.now()
+                iface_name = (self.selected_interface.name
+                              if self.selected_interface else "")
+                if (iface_name and cursor.cidr not in self._scope_temp_ip
+                        and not self._has_local_ip_for_subnet(cursor.cidr)):
+                    cand = f"{base}.200"
+                    self._set_task(
+                        f"P1 {cursor.cidr} is off-link — adding {cand}...",
+                        "triage")
+                    try:
+                        if add_secondary_ip(iface_name, cand):
+                            self._scope_temp_ip[cursor.cidr] = cand
+                            time.sleep(0.5)
+                    except Exception:
+                        pass
+            host = cursor.next_host
+            ip = f"{base}.{host}"
+            cursor.next_host = host + 1
+            if cursor.next_host > 254:
+                cursor.completed = True
+                cursor.completed_at = _dt.datetime.now()
+                temp = self._scope_temp_ip.pop(cursor.cidr, None)
+                if temp and self.selected_interface:
+                    try:
+                        remove_secondary_ip(self.selected_interface.name, temp)
+                    except Exception:
+                        pass
 
         idx = next((i for i, s in enumerate(self._known_scopes)
                     if s.cidr == cursor.cidr), 0) + 1
+        total_hosts = len(hosts) if hosts else 254
+        cur_host = cursor.next_host - 1 if hosts else (cursor.next_host - 1)
         self._set_task(
-            f"P1 known {cursor.cidr} — checking {ip} ({host}/254)",
-            "triage", host, 254)
+            f"P1 known {cursor.cidr} — checking {ip} ({cur_host}/{total_hosts})",
+            "triage", cur_host, total_hosts)
 
         # Budget: 1 ping (≤0.5s). Alive → basic fingerprint, then queue for P5.
         try:
@@ -971,6 +1049,12 @@ class DiscoveryOrchestrator:
             entry = pend[0] if pend else None
         if not entry:
             return False
+
+        # Budget + rate-limit
+        if not self._consume_probe_budget(1):
+            return False
+        if self._probe_delay > 0:
+            time.sleep(self._probe_delay)
 
         entry.attempts += 1
         entry.last_checked = _dt.datetime.now()
@@ -1048,12 +1132,17 @@ class DiscoveryOrchestrator:
         if not cand:
             return False
 
-        cand.attempts += 1
-        cand.status = "validating"
-        # Probe ONLY: up to 3 observed talkers + the suspected gateway.
+        # Budget + rate-limit (each target counts as one probe)
         targets = list(dict.fromkeys(cand.observed_ips))[:3]
         if cand.suspected_gateway and cand.suspected_gateway not in targets:
             targets.append(cand.suspected_gateway)
+        if not self._consume_probe_budget(len(targets)):
+            return False
+        if self._probe_delay > 0:
+            time.sleep(self._probe_delay)
+
+        cand.attempts += 1
+        cand.status = "validating"
         self._set_task(
             f"P3 validate {cand.cidr} — {len(targets)} evidence IP(s), no full scan",
             "triage")
@@ -1128,6 +1217,13 @@ class DiscoveryOrchestrator:
                          and o.ip and self._backoff_due(f"or:{o.ip}")), None)
         if not orph:
             return False
+
+        # Budget + rate-limit
+        if not self._consume_probe_budget(1):
+            return False
+        if self._probe_delay > 0:
+            time.sleep(self._probe_delay)
+
         orph.last_checked = _dt.datetime.now()
         self._set_task(f"P4 orphan {orph.ip or orph.mac} — {orph.reason}", "triage")
         try:
@@ -2143,6 +2239,7 @@ class DiscoveryOrchestrator:
         )
         device.device_class = result.device_type
         device.warn_reset = result.warn_reset
+        device.classification_rationale = result.rationale
 
     # ─── Subnet Watch (Wireshark-inspired) ───────────────────────────
     # Any subnet we observe in live traffic gets automatically configured
@@ -2529,42 +2626,92 @@ class DiscoveryOrchestrator:
             "sadp_response", "dahua_udp_response", "ssdp_camera_service", "mdns_camera_service",
         } & evidence_kinds) or device.onvif_status == "found"
 
+        # Link: L2 reachability (ARP or ping)
+        link_pass = bool(device.mac or "ping_responded" in evidence_kinds or "ARP" in device.discovery_methods)
         device.dpi_stages["link"] = existing.get("link", DPIStageResult(
             stage="link",
-            status="pass" if device.mac or "ARP" in device.discovery_methods else "unchecked",
-            detail=f"MAC resolved: {device.mac}" if device.mac else "No L2 signal yet",
+            status="pass" if link_pass else "unchecked",
+            detail=f"MAC resolved: {device.mac}" if device.mac else ("Ping responded" if "ping_responded" in evidence_kinds else "No L2 signal yet"),
             timestamp=now,
         ))
+
+        # DHCP / IP assignment
+        dhcp_pass = bool(device.mac or "dhcp_lease_seen" in evidence_kinds or "dhcp_request" in evidence_kinds)
         device.dpi_stages["dhcp"] = existing.get("dhcp", DPIStageResult(
             stage="dhcp",
-            status="pass" if device.mac else "unchecked",
-            detail=f"MAC resolved: {device.mac}" if device.mac else "No ARP/DHCP identity yet",
+            status="pass" if dhcp_pass else "unchecked",
+            detail=f"MAC resolved: {device.mac}" if device.mac else ("DHCP evidence seen" if dhcp_pass else "No ARP/DHCP identity yet"),
             timestamp=now,
         ))
+
+        # Discovery
         device.dpi_stages["discovery"] = existing.get("discovery", DPIStageResult(
             stage="discovery",
             status="pass" if discovery_ok else "fail",
             detail=", ".join(device.discovery_methods) if device.discovery_methods else "No discovery evidence",
             timestamp=now,
         ))
+
+        # Auth reachable
+        auth_pass = bool(device.web_url) or bool({"http_camera_banner", "onvif_device_info"} & evidence_kinds)
         device.dpi_stages["auth"] = existing.get("auth", DPIStageResult(
             stage="auth",
-            status="pass" if bool(device.web_url) else "fail",
+            status="pass" if auth_pass else "fail",
             detail=device.web_url or "No web/admin endpoint seen",
             timestamp=now,
         ))
+
+        # RTSP stream
+        rtsp_evidence = {"rtsp_describe_response", "rtsp_setup_play", "rtsp_port_open"} & evidence_kinds
+        rtsp_pass = bool(rtsp_evidence)
+        rtsp_na = 554 not in device.open_ports and not device.rtsp_url
         device.dpi_stages["rtsp"] = existing.get("rtsp", DPIStageResult(
             stage="rtsp",
-            status="pass" if {"rtsp_describe_response", "rtsp_setup_play", "rtsp_port_open"} & evidence_kinds else ("na" if 554 not in device.open_ports else "fail"),
-            detail=device.rtsp_url or ("No RTSP evidence" if 554 not in device.open_ports else "Port 554 open but probe incomplete"),
+            status="pass" if rtsp_pass else ("na" if rtsp_na else "fail"),
+            detail=device.rtsp_url or ("No RTSP evidence" if rtsp_na else "Port 554 open but probe incomplete"),
             timestamp=now,
         ))
+
+        # ONVIF control
+        onvif_evidence = {"onvif_device_service_url", "onvif_port_responding", "onvif_device_info"} & evidence_kinds
+        onvif_pass = bool(onvif_evidence) or device.onvif_status == "found"
+        onvif_na = 8899 not in device.open_ports and not device.onvif_url
         device.dpi_stages["onvif_ctrl"] = existing.get("onvif_ctrl", DPIStageResult(
             stage="onvif_ctrl",
-            status="pass" if {"onvif_device_service_url", "onvif_port_responding", "onvif_device_info"} & evidence_kinds else ("na" if 8899 not in device.open_ports and not device.onvif_url else "fail"),
+            status="pass" if onvif_pass else ("na" if onvif_na else "fail"),
             detail=device.onvif_url or "No ONVIF control evidence",
             timestamp=now,
         ))
+
+        # NTP sync
+        ntp_pass = "ntp_port_open" in evidence_kinds or 123 in device.open_ports
+        device.dpi_stages["ntp"] = existing.get("ntp", DPIStageResult(
+            stage="ntp",
+            status="pass" if ntp_pass else "unchecked",
+            detail="NTP port 123 open" if ntp_pass else "No NTP evidence",
+            timestamp=now,
+        ))
+
+        # DNS
+        dns_pass = "dns_query_seen" in evidence_kinds or 53 in device.open_ports
+        device.dpi_stages["dns"] = existing.get("dns", DPIStageResult(
+            stage="dns",
+            status="pass" if dns_pass else "unchecked",
+            detail="DNS port 53 open" if dns_pass else "No DNS evidence",
+            timestamp=now,
+        ))
+
+        # Cloud / P2P egress
+        cloud_pass = "cloud_egress_seen" in evidence_kinds
+        cloud_fail = "cloud_egress_blocked" in evidence_kinds
+        device.dpi_stages["cloud"] = existing.get("cloud", DPIStageResult(
+            stage="cloud",
+            status="pass" if cloud_pass else ("fail" if cloud_fail else "unchecked"),
+            detail="Cloud/P2P egress detected" if cloud_pass else ("Cloud egress blocked" if cloud_fail else "No cloud egress evidence"),
+            timestamp=now,
+        ))
+
+        # Recording path
         if "subnet_mismatch_visible" in evidence_kinds or device.subnet_mismatch:
             device.dpi_stages["recording"] = existing.get("recording", DPIStageResult(
                 stage="recording",
@@ -2573,10 +2720,11 @@ class DiscoveryOrchestrator:
                 timestamp=now,
             ))
         else:
+            rec_pass = "nvr_channel_match" in evidence_kinds or "nvr_channel_listed" in evidence_kinds
             device.dpi_stages.setdefault("recording", DPIStageResult(
                 stage="recording",
-                status="na",
-                detail="Recording path must be verified at NVR/storage side, not from camera endpoint",
+                status="pass" if rec_pass else "na",
+                detail="Listed in NVR channel list" if rec_pass else "Recording path must be verified at NVR/storage side, not from camera endpoint",
                 timestamp=now,
             ))
 
