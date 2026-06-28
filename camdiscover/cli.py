@@ -69,6 +69,8 @@ def main():
     web_parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     web_parser.add_argument("--port", type=int, default=5000, help="Bind port (default: 5000)")
     web_parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser (used by Electron)")
+    web_parser.add_argument("--db-path", help="SQLite database path")
+    web_parser.add_argument("--site-id", help="Bind the live session to a persisted site")
 
     # subnets command
     subnet_parser = subparsers.add_parser("subnets", help="Manage subnet zones")
@@ -290,7 +292,7 @@ def run_web(args):
     from .webapp import create_app
     import webbrowser, threading
 
-    app = create_app()
+    app = create_app(db_path=getattr(args, "db_path", None), site_id=getattr(args, "site_id", None))
     host = args.host
     port = args.port
     url = f"http://127.0.0.1:{port}"

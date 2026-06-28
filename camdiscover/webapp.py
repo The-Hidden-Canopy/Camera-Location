@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import ipaddress
 import re
@@ -15,6 +15,11 @@ import urllib.error
 
 from flask import Flask, render_template, jsonify, request, Response, send_file
 
+from .security import get_token_from_env, register_health, require_backend_token, set_token
+from .api.routes import register_routes
+from .api.change_routes import register_change_routes
+from .persistence.db import get_database
+from .services.discovery_service import DiscoveryService
 from .orchestrator import DiscoveryOrchestrator
 from .models import (
     DiscoveredDevice, SubnetZone, CapturePosition, CAPTURE_POSITIONS,
@@ -70,7 +75,12 @@ def expand_subnet_range(entry: str) -> List[str]:
     return []
 
 
-def create_app() -> Flask:
+def create_app(
+    db_path: str | None = None,
+    site_id: str | None = None,
+    backend_token: str | None = None,
+    backend_nonce: str | None = None,
+) -> Flask:
     # create_app() is the universal main-thread chokepoint for every web
     # launch path (python -m camdiscover web, cli run_web, Electron). Install
     # the netsh-cleanup signal handlers here so the desktop app window closing
@@ -85,6 +95,35 @@ def create_app() -> Flask:
         template_folder="web/templates",
         static_folder="web/static",
     )
+
+    db = get_database(db_path)
+
+    # Backend security channel
+    if backend_token and backend_nonce:
+        set_token(backend_token, backend_nonce)
+
+    register_health(app)
+
+    @app.before_request
+    def token_gate():
+        """Require the backend launch token on /api routes when one is configured.
+
+        /health is exempt so the launcher can verify the nonce before the token is
+        distributed. Static files and the SPA index are also exempt.
+        """
+        path = request.path
+        if path == "/health" or not path.startswith("/api"):
+            return None
+        expected = get_token_from_env()
+        if not expected:
+            return None
+        supplied = request.headers.get("X-Backend-Token") or request.args.get("backend_token")
+        if not supplied:
+            return jsonify({"error": "unauthorized"}), 401
+        import secrets
+        if not secrets.compare_digest(supplied, expected):
+            return jsonify({"error": "unauthorized"}), 401
+        return None
 
     # Global state
     orchestrator = DiscoveryOrchestrator()
@@ -975,6 +1014,35 @@ def create_app() -> Flask:
             "orphans":           orphans,
             "total":             len(mismatches) + len(gw_mismatches) + len(orphans),
         })
+
+    @app.route("/api/sites/current", methods=["GET", "POST"])
+    def api_set_current_site():
+        """Bind the active discovery session to a site."""
+        if request.method == "GET":
+            return jsonify({"site_id": discovery_svc._site_id})
+        body = request.json or {}
+        site_id = body.get("site_id")
+        try:
+            discovery_svc.set_site(site_id)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 404
+        return jsonify({"site_id": discovery_svc._site_id})
+
+    # Persist discovery events to durable asset/endpoint records.
+    discovery_svc = DiscoveryService(orchestrator, db=db)
+    if site_id:
+        try:
+            discovery_svc.set_site(site_id)
+        except ValueError:
+            pass
+
+    app.config["CAMDISCOVER_DB"] = db
+    app.config["CAMDISCOVER_DB_PATH"] = str(db.db_path)
+    app.config["DISCOVERY_ORCHESTRATOR"] = orchestrator
+    app.config["DISCOVERY_SERVICE"] = discovery_svc
+
+    register_routes(app)
+    register_change_routes(app)
 
     return app
 

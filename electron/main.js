@@ -13,13 +13,19 @@ const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const net  = require('net');
+const http = require('http');
+const crypto = require('crypto');
 
 // ─── Config ──────────────────────────────────────────────────────────────
-const FLASK_PORT           = 5000;
 const FLASK_HOST           = '127.0.0.1';
+const FLASK_PORT_RANGE       = { min: 30000, max: 62000 };
 const FLASK_STARTUP_TIMEOUT = 30000;
-const APP_URL              = `http://${FLASK_HOST}:${FLASK_PORT}`;
-const IS_DEV               = process.argv.includes('--dev');
+const IS_DEV                = process.argv.includes('--dev');
+
+let FLASK_PORT     = 0;
+let BACKEND_TOKEN  = '';
+let BACKEND_NONCE  = '';
+let APP_URL        = '';
 
 let tray        = null;
 let mainWindow  = null;
@@ -109,17 +115,105 @@ function relaunchAsAdmin() {
 
 // ─── Flask backend ────────────────────────────────────────────────────────
 
-function startFlask() {
+function pickRandomPort(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function isPortFree(host, port) {
+  return new Promise((resolve) => {
+    const sock = new net.Socket();
+    sock.setTimeout(1000);
+    sock.on('connect', () => { sock.destroy(); resolve(false); });
+    sock.on('error',   () => { sock.destroy(); resolve(true); });
+    sock.on('timeout', () => { sock.destroy(); resolve(true); });
+    sock.connect(port, host);
+  });
+}
+
+async function pickBackendPort() {
+  let port = 0;
+  for (let i = 0; i < 20; i++) {
+    const candidate = pickRandomPort(FLASK_PORT_RANGE.min, FLASK_PORT_RANGE.max);
+    if (await isPortFree(FLASK_HOST, candidate)) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) {
+    throw new Error('Could not find a free loopback port for the Flask backend');
+  }
+  return port;
+}
+
+function generateSecrets() {
+  BACKEND_TOKEN = crypto.randomBytes(32).toString('hex');
+  BACKEND_NONCE = crypto.randomBytes(16).toString('hex');
+}
+
+function healthCheck(host, port, nonce, timeout) {
   return new Promise((resolve, reject) => {
+    const start = Date.now();
+    function attempt() {
+      const req = http.get(
+        `http://${host}:${port}/health`,
+        { timeout: 1000 },
+        (res) => {
+          let body = '';
+          res.on('data', chunk => body += chunk);
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(body);
+              if (res.statusCode === 200 && json.nonce === nonce) {
+                resolve();
+                return;
+              }
+            } catch {}
+            retry();
+          });
+        }
+      );
+      req.on('error', retry);
+      req.on('timeout', () => { req.destroy(); retry(); });
+    }
+    function retry() {
+      if (Date.now() - start > timeout) {
+        reject(new Error('Backend health check failed: nonce mismatch or no response'));
+      } else {
+        setTimeout(attempt, 400);
+      }
+    }
+    setTimeout(attempt, 200);
+  });
+}
+
+async function startFlask() {
+  return new Promise(async (resolve, reject) => {
+    generateSecrets();
+    try {
+      FLASK_PORT = await pickBackendPort();
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    APP_URL = `http://${FLASK_HOST}:${FLASK_PORT}`;
+
     const pythonCmd = resolvePythonCommand();
     const appRoot = getAppRoot();
     const args = ['-m', 'camdiscover', 'web',
                   '--host', FLASK_HOST, '--port', String(FLASK_PORT), '--no-browser'];
+    if (process.env.CAMERA_DISCOVERY_DB_PATH) {
+      args.push('--db-path', process.env.CAMERA_DISCOVERY_DB_PATH);
+    }
+    if (process.env.CAMERA_DISCOVERY_SITE_ID) {
+      args.push('--site-id', process.env.CAMERA_DISCOVERY_SITE_ID);
+    }
 
     console.log(`[Flask] Starting: ${pythonCmd} ${args.join(' ')}`);
 
     const env = {
       ...process.env,
+      CAM_BACKEND_TOKEN: BACKEND_TOKEN,
+      CAM_BACKEND_NONCE: BACKEND_NONCE,
       PYTHONPATH: process.env.PYTHONPATH
         ? `${appRoot}${path.delimiter}${process.env.PYTHONPATH}`
         : appRoot,
@@ -140,30 +234,8 @@ function startFlask() {
       flaskProcess = null;
     });
 
-    waitForFlask(FLASK_HOST, FLASK_PORT, FLASK_STARTUP_TIMEOUT)
+    healthCheck(FLASK_HOST, FLASK_PORT, BACKEND_NONCE, FLASK_STARTUP_TIMEOUT)
       .then(resolve).catch(reject);
-  });
-}
-
-function waitForFlask(host, port, timeout) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    function attempt() {
-      const sock = new net.Socket();
-      sock.setTimeout(1000);
-      sock.on('connect', () => { sock.destroy(); resolve(); });
-      sock.on('error',   () => { sock.destroy(); retry(); });
-      sock.on('timeout', () => { sock.destroy(); retry(); });
-      sock.connect(port, host);
-    }
-    function retry() {
-      if (Date.now() - start > timeout) {
-        reject(new Error(`Flask did not start within ${timeout / 1000}s`));
-      } else {
-        setTimeout(attempt, 500);
-      }
-    }
-    setTimeout(attempt, 800);
   });
 }
 
@@ -284,7 +356,7 @@ function createTray() {
   const menu = Menu.buildFromTemplate([
     { label: 'Open Dashboard', click: () => createWindow() },
     { type: 'separator' },
-    { label: `Backend at ${APP_URL}`, enabled: false },
+    { label: `Backend at ${APP_URL}`, enabled: true },
     { type: 'separator' },
     { label: 'Quit', click: () => { tray = null; stopFlask(); app.quit(); } },
   ]);
@@ -313,6 +385,10 @@ ipcMain.handle('app:isMaximized', () => {
 
 ipcMain.handle('app:close', () => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+});
+
+ipcMain.handle('app:getBackendSecrets', () => {
+  return { url: APP_URL, token: BACKEND_TOKEN };
 });
 
 ipcMain.handle('app:getFlaskUrl', () => APP_URL);

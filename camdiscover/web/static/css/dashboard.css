@@ -57,6 +57,12 @@
 }
 .cam__tr:hover { background: var(--bg-hover); }
 .cam__tr--selected { background: rgba(34,211,238,.06); }
+.cam__tr--persisted {
+  background: rgba(34,211,238,.03);
+}
+.cam__tr--persisted:hover {
+  background: rgba(34,211,238,.08);
+}
 
 .cam__td {
   padding: 7px 10px;
@@ -106,6 +112,17 @@
 .cam__vendor-badge--lorex       { background: rgba(156,163,175,.15); color: #d1d5db; }
 .cam__vendor-badge--generic     { background: rgba(107,114,128,.1); color: #6b7280; }
 .cam__vendor-badge--unknown     { background: rgba(107,114,128,.08); color: #4b5563; }
+
+.cam__record-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  background: rgba(34,211,238,.12);
+  color: #67e8f9;
+}
 
 .cam__td--ports {
   font-family: var(--font-mono);
@@ -277,6 +294,10 @@
 }
 .cam__detail-field__value a:hover {
   text-decoration: underline;
+}
+
+.cam__detail-field__value--mono {
+  font-family: var(--font-mono);
 }
 
 /* ─── Empty state ────────────────────────────────────────────────────────── */

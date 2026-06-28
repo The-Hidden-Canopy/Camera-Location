@@ -286,6 +286,11 @@
   border-color: var(--accent-cyan);
   color: var(--accent-cyan);
 }
+.cam__export-btn--active {
+  background: rgba(34,211,238,.12);
+  border-color: rgba(34,211,238,.45);
+  color: var(--accent-cyan);
+}
 
 /* ─── 03. Body layout ────────────────────────────────────────────────────── */
 .cam__body {

@@ -27,7 +27,7 @@
     <header class="cam__header">
       <div class="cam__header-brand">
         <span class="cam__brand-icon">&#9673;</span>
-        CAM DISCOVER
+        NETWORK DISCOVERY
       </div>
       <div class="cam__header-divider"></div>
 
@@ -59,6 +59,18 @@
       </div>
 
       <div class="cam__header-spacer"></div>
+
+      <select class="cam__iface-select" id="site-select" title="Persisted site binding">
+        <option value="">No Site Bound</option>
+      </select>
+
+      <div class="cam__header-divider"></div>
+
+      <button class="cam__export-btn" id="inventory-toggle" title="Toggle between live session and persisted inventory">
+        Live View
+      </button>
+
+      <div class="cam__header-divider"></div>
 
       <div class="cam__status-indicators">
         <div class="cam__capture-pos" id="capture-pos" title="Capture position — click to change">

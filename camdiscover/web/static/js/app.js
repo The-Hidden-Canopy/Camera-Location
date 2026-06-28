@@ -14,6 +14,11 @@
 
   // ─── State ──────────────────────────────────────────────────────────
   let devices = [];
+  let liveDevices = [];
+  let persistedInventory = [];
+  let sites = [];
+  let currentSiteId = '';
+  let inventoryMode = 'live';
   let selectedDeviceIp = null;
   let currentMode = 'listen';
   let isScanning = false;
@@ -46,6 +51,8 @@
 
   const app = $('#app');
   const ifaceSelect = $('#iface-select');
+  const siteSelect = $('#site-select');
+  const inventoryToggle = $('#inventory-toggle');
   const modeTabs = $$('.cam__mode-tab');
   const scanBtn  = $('#scan-btn');
   const clearBtn = $('#clear-btn');
@@ -87,11 +94,15 @@
   async function init() {
     detectElectron();
     await loadInterfaces();
+    await loadSites();
+    await loadCurrentSite();
     await loadCapturePosition();
     await loadSubnetZones();
     bindEvents();
     connectSSE();
     await loadExistingDevices();
+    await loadPersistedInventory();
+    syncDisplayedDevices();
     purgeSweepSubnetStorage();
     initTriagePanel();
     initSensorBanner();
@@ -499,10 +510,192 @@
   async function loadExistingDevices() {
     try {
       const resp = await fetch('/api/devices');
-      devices = await resp.json();
-      renderTable();
-      updateStats();
+      liveDevices = await resp.json();
+      syncDisplayedDevices();
     } catch(e) { /* no existing devices */ }
+  }
+
+  async function loadSites() {
+    try {
+      const resp = await fetch('/api/sites');
+      sites = await resp.json();
+      renderSiteOptions();
+    } catch(e) { /* ignore */ }
+  }
+
+  async function loadCurrentSite() {
+    try {
+      const resp = await fetch('/api/sites/current');
+      const data = await resp.json();
+      currentSiteId = data.site_id || '';
+      renderSiteOptions();
+      renderInventoryMode();
+    } catch(e) { /* ignore */ }
+  }
+
+  async function setCurrentSite(siteId) {
+    const resp = await fetch('/api/sites/current', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site_id: siteId || null }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(data.error || 'Failed to set site');
+    }
+    currentSiteId = data.site_id || '';
+    renderSiteOptions();
+    await loadPersistedInventory();
+    syncDisplayedDevices();
+  }
+
+  async function loadPersistedInventory() {
+    if (!currentSiteId) {
+      persistedInventory = [];
+      if (inventoryMode === 'persisted') syncDisplayedDevices();
+      return;
+    }
+    try {
+      const resp = await fetch(`/api/inventory/current?site_id=${encodeURIComponent(currentSiteId)}`);
+      persistedInventory = await resp.json();
+      if (inventoryMode === 'persisted') syncDisplayedDevices();
+    } catch(e) { /* ignore */ }
+  }
+
+  function renderSiteOptions() {
+    if (!siteSelect) return;
+    siteSelect.innerHTML = '<option value="">No Site Bound</option>';
+    sites.forEach(site => {
+      const opt = document.createElement('option');
+      opt.value = site.site_id;
+      opt.textContent = site.name;
+      if (site.site_id === currentSiteId) opt.selected = true;
+      siteSelect.appendChild(opt);
+    });
+  }
+
+  function mapPersistedInventoryRow(row) {
+    const endpoint = row.endpoint || {};
+    const asset = row.asset || {};
+    const observations = row.observations || [];
+    const vendor = asset.manufacturer || 'Unknown';
+    const model = asset.model || '';
+    const openPorts = [];
+    const protocols = new Set();
+    const addPort = (value) => {
+      const port = Number(value);
+      if (port > 0 && !openPorts.includes(port)) openPorts.push(port);
+    };
+    const addUrlPort = (rawUrl, fallback) => {
+      if (!rawUrl) return;
+      try {
+        const parsed = new URL(rawUrl);
+        addPort(parsed.port || fallback);
+      } catch (_) {
+        addPort(fallback);
+      }
+    };
+    const hostnameObs = observations.find(o => o.kind === 'dns_name_seen');
+    const hostname = hostnameObs && hostnameObs.detail
+      ? String(hostnameObs.detail).replace(/^DNS name observed:\s*/i, '')
+      : '';
+    if (endpoint.web_url) {
+      protocols.add('HTTP');
+      addUrlPort(endpoint.web_url, endpoint.web_url.startsWith('https://') ? 443 : 80);
+    }
+    if (endpoint.rtsp_url) {
+      protocols.add('RTSP');
+      addUrlPort(endpoint.rtsp_url, 554);
+    }
+    if (endpoint.onvif_url) {
+      protocols.add('ONVIF');
+      addUrlPort(endpoint.onvif_url, 80);
+    }
+    observations.forEach(o => {
+      if (o.kind === 'wsd_onvif_probe_match' || o.kind === 'onvif_device_service_seen') protocols.add('ONVIF');
+      if (o.kind === 'rtsp_describe_seen' || o.kind === 'rtsp_session_seen') protocols.add('RTSP');
+      if (o.kind === 'http_camera_marker_seen' || o.kind === 'http_endpoint_seen') protocols.add('HTTP');
+    });
+    const weightedEvidence = observations.reduce((sum, obs) => sum + (Number(obs.weight) || 0), 0);
+    const persistedConfidence = Math.max(
+      15,
+      Math.min(
+        95,
+        (asset.asset_type === 'camera' ? 35 : 20) +
+        (endpoint.device_class === 'camera' ? 20 : 0) +
+        (asset.serial ? 8 : 0) +
+        (asset.onvif_uuid ? 10 : 0) +
+        Math.max(weightedEvidence, 0)
+      )
+    );
+    return {
+      device_id: asset.asset_id || endpoint.endpoint_id || endpoint.ip || '',
+      asset_id: asset.asset_id || '',
+      endpoint_id: endpoint.endpoint_id || '',
+      ip: endpoint.ip || '',
+      ip_history: endpoint.ip_history || [],
+      mac: endpoint.mac || '',
+      mac_history: endpoint.mac_history || [],
+      serial: asset.serial || '',
+      onvif_uuid: asset.onvif_uuid || endpoint.onvif_uuid || '',
+      vendor,
+      hostname,
+      model,
+      firmware: endpoint.firmware || '',
+      open_ports: openPorts.sort((a, b) => a - b),
+      protocols: Array.from(protocols),
+      onvif_status: endpoint.onvif_url ? 'found' : 'not-checked',
+      rtsp_status: endpoint.rtsp_url ? 'found' : 'not-checked',
+      web_url: endpoint.web_url || '',
+      rtsp_url: endpoint.rtsp_url || '',
+      onvif_url: endpoint.onvif_url || '',
+      subnet: endpoint.subnet || '',
+      confidence: persistedConfidence,
+      fingerprint_score: persistedConfidence,
+      discovery_methods: observations.map(o => o.source).filter(Boolean),
+      last_seen: endpoint.last_seen || '',
+      evidence: observations.map(o => ({
+        kind: o.kind,
+        detail: o.detail,
+        source: o.source,
+        weight: o.weight,
+        timestamp: o.observed_at,
+      })),
+      subnet_mismatch: '',
+      dpi_stages: {},
+      dpi_score: null,
+      dpi_summary: 'Derived from persisted evidence',
+      subnet_zone: '',
+      device_class: endpoint.device_class || 'unknown',
+      device_type: endpoint.device_class || 'unknown',
+      device_type_confidence: 55,
+      warn_reset: false,
+      suspected_old_gateway: '',
+      poe_state: '',
+      notes: asset.notes || '',
+      apipa_seen: false,
+      validation: {},
+      classification_rationale: 'Persisted inventory record with reconciled endpoint evidence',
+      persisted: true,
+      installed_status: asset.installed_status || '',
+      expected_location_id: asset.expected_location_id || '',
+      observation_count: observations.length,
+    };
+  }
+
+  function syncDisplayedDevices() {
+    devices = inventoryMode === 'persisted'
+      ? persistedInventory.map(mapPersistedInventoryRow)
+      : [...liveDevices];
+    renderInventoryMode();
+    renderTable();
+    updateStats();
+  }
+
+  function renderInventoryMode() {
+    if (!inventoryToggle) return;
+    inventoryToggle.textContent = inventoryMode === 'persisted' ? 'Persisted View' : 'Live View';
+    inventoryToggle.classList.toggle('cam__export-btn--active', inventoryMode === 'persisted');
   }
 
   async function loadCapturePosition() {
@@ -545,14 +738,14 @@
       case 'device_found':
         upsertDevice(data);
         addActivityEvent('found', `Found ${data.ip} — ${data.vendor}`);
-        renderTable();
-        updateStats();
+        syncDisplayedDevices();
+        if (inventoryMode === 'persisted' && currentSiteId) loadPersistedInventory();
         break;
 
       case 'device_updated':
         upsertDevice(data);
-        renderTable();
-        updateStats();
+        syncDisplayedDevices();
+        if (inventoryMode === 'persisted' && currentSiteId) loadPersistedInventory();
         break;
 
       case 'progress':
@@ -582,9 +775,8 @@
         break;
 
       case 'devices_cleared':
-        devices = [];
-        renderTable();
-        updateStats();
+        liveDevices = [];
+        syncDisplayedDevices();
         addActivityEvent('found', 'Device list cleared');
         break;
 
@@ -640,6 +832,29 @@
 
     // Search
     on(searchInput, 'input', debounce(renderTable, 200));
+
+    on(siteSelect, 'change', async () => {
+      try {
+        await setCurrentSite(siteSelect.value);
+        addActivityEvent('found', currentSiteId ? `Bound session to site` : 'Cleared site binding');
+      } catch (e) {
+        addActivityEvent('error', e.message || 'Failed to bind site');
+      }
+    });
+
+    on(inventoryToggle, 'click', async () => {
+      if (inventoryMode === 'live') {
+        if (!currentSiteId) {
+          addActivityEvent('error', 'Bind a site before using persisted inventory');
+          return;
+        }
+        await loadPersistedInventory();
+        inventoryMode = 'persisted';
+      } else {
+        inventoryMode = 'live';
+      }
+      syncDisplayedDevices();
+    });
 
     // Sidebar collapse
     on(sidebarCollapse, 'click', () => {
@@ -783,9 +998,13 @@
   // Upsert helper — both device_found and device_updated go through here so
   // the table never contains duplicate rows regardless of event ordering.
   function upsertDevice(d) {
-    const idx = devices.findIndex(x => x.ip === d.ip);
-    if (idx >= 0) devices[idx] = d;
-    else devices.push(d);
+    const idx = liveDevices.findIndex(x =>
+      (d.endpoint_id && x.endpoint_id && x.endpoint_id === d.endpoint_id) ||
+      (d.asset_id && x.asset_id && x.asset_id === d.asset_id) ||
+      x.ip === d.ip
+    );
+    if (idx >= 0) liveDevices[idx] = d;
+    else liveDevices.push(d);
   }
 
   async function stopScan() {
@@ -844,10 +1063,10 @@
       tableBody.innerHTML = `
         <tr class="cam__empty-row">
           <td colspan="11">
-            <div class="cam__empty-state">
-              <div class="cam__empty-icon">&#9673;</div>
-              <div class="cam__empty-text">${devices.length === 0 ? 'No devices discovered yet' : 'No devices match filters'}</div>
-              <div class="cam__empty-hint">${devices.length === 0 ? 'Select an interface and start a scan' : 'Adjust sidebar filters'}</div>
+              <div class="cam__empty-state">
+                <div class="cam__empty-icon">&#9673;</div>
+              <div class="cam__empty-text">${devices.length === 0 ? (inventoryMode === 'persisted' ? 'No persisted devices for this site' : 'No devices discovered yet') : 'No devices match filters'}</div>
+              <div class="cam__empty-hint">${devices.length === 0 ? (inventoryMode === 'persisted' ? 'Bind a site and reconcile devices into inventory' : 'Select an interface and start a scan') : 'Adjust sidebar filters'}</div>
             </div>
           </td>
         </tr>`;
@@ -864,6 +1083,9 @@
       const dpiBar = renderDPIBar(device.dpi_stages, device.dpi_score);
       const confidenceHtml = renderConfidence(device.confidence);
       const actionLinks = renderActionLinks(device);
+      const persistedBadge = device.persisted
+        ? `<span class="cam__record-badge" title="Site inventory record">REC</span>`
+        : '';
 
       // Classification badges
       const dcBadge = device.device_type && device.device_type !== 'unknown'
@@ -880,7 +1102,7 @@
         : '';
 
       html += `
-        <tr class="cam__tr ${isSelected ? 'cam__tr--selected' : ''} cam__tr--new"
+        <tr class="cam__tr ${isSelected ? 'cam__tr--selected' : ''} ${device.persisted ? 'cam__tr--persisted' : 'cam__tr--new'}"
             data-ip="${esc(device.ip)}" onclick="window._selectDevice('${esc(device.ip)}')">
           <td class="cam__td">
             <button class="cam__expand-btn" onclick="event.stopPropagation(); window._toggleExpand('${esc(device.ip)}')">&#9654;</button>
@@ -888,7 +1110,7 @@
           <td class="cam__td cam__td--ip">${esc(device.ip)}${apipaBadge}${gwMismatchBadge}</td>
           <td class="cam__td cam__td--mac">${esc(device.mac || '\u2014')}</td>
           <td class="cam__td cam__td--vendor">
-            <span class="cam__vendor-badge ${vendorClass}">${esc(device.vendor)}</span>${dcBadge}${warnBadge}
+            <span class="cam__vendor-badge ${vendorClass}">${esc(device.vendor)}</span>${persistedBadge}${dcBadge}${warnBadge}
           </td>
           <td class="cam__td">${esc(device.model || '\u2014')}</td>
           <td class="cam__td cam__td--ports">${portTags}</td>
@@ -914,13 +1136,18 @@
   function renderInlineDetail(device) {
     const evidence = Array.isArray(device.evidence) ? device.evidence.slice().sort((a, b) => (b.weight || 0) - (a.weight || 0)) : [];
     const fields = [
+      ['Record Source', device.persisted ? 'Persisted site inventory' : 'Live session'],
       ['IP Address', device.ip + (device.apipa_seen ? ' <span style="color:#d29922;font-size:10px">&#9888; APIPA</span>' : '')],
       ['MAC Address', device.mac || '\u2014'],
+      ['Asset ID', device.asset_id || '\u2014'],
+      ['Endpoint ID', device.endpoint_id || '\u2014'],
       ['Vendor', device.vendor],
       ['Device Type', device.device_type || device.device_class || 'unknown'],
       ['Type Confidence', `${device.device_type_confidence != null ? device.device_type_confidence : 0}%`],
       ['Model', device.model || '\u2014'],
       ['Hostname', device.hostname || '\u2014'],
+      ['Serial', device.serial || '\u2014'],
+      ['ONVIF UUID', device.onvif_uuid || '\u2014'],
       ['Subnet', device.subnet || '\u2014'],
       ['Subnet Zone', device.subnet_zone || '\u2014'],
       ['ONVIF URL', device.onvif_url ? `<a href="${esc(device.onvif_url)}" target="_blank">${esc(device.onvif_url)}</a>` : '\u2014'],
@@ -935,14 +1162,18 @@
       ['Discovery', (device.discovery_methods || []).join(', ')],
       ['PoE / Link State', device.poe_state || '\u2014'],
       ['Last Seen', device.last_seen ? new Date(device.last_seen).toLocaleTimeString() : '\u2014'],
+      ...(device.persisted ? [['Persisted Observations', String(device.observation_count || 0)], ['Install State', device.installed_status || '\u2014']] : []),
     ];
 
     let html = '<div class="cam__detail-grid">';
     fields.forEach(([label, value]) => {
+      const monoClass = /^(IP Address|MAC Address|Asset ID|Endpoint ID|Serial|ONVIF UUID|ONVIF URL|RTSP URL|Web URL|Last Seen)$/.test(label)
+        ? ' cam__detail-field__value--mono'
+        : '';
       html += `
         <div class="cam__detail-field">
           <span class="cam__detail-field__label">${label}</span>
-          <span class="cam__detail-field__value">${value}</span>
+          <span class="cam__detail-field__value${monoClass}">${value}</span>
         </div>`;
     });
     html += '</div>';
@@ -1209,8 +1440,12 @@
     sections.push({
       title: 'Identity',
       fields: [
+        ['Asset ID', device.asset_id || '\u2014'],
+        ['Endpoint ID', device.endpoint_id || '\u2014'],
         ['IP Address', device.ip + (device.apipa_seen ? ' <span style="color:#d29922;font-size:10px">APIPA</span>' : '')],
         ['MAC Address', device.mac || '\u2014'],
+        ['Serial', device.serial || '\u2014'],
+        ['ONVIF UUID', device.onvif_uuid || '\u2014'],
         ['Vendor', device.vendor],
         ['Device Type', device.device_type || device.device_class || 'unknown'],
         ['Type Confidence', `${device.device_type_confidence != null ? device.device_type_confidence : 0}%`],
@@ -1227,6 +1462,7 @@
       fields: [
         ['Subnet', device.subnet || '\u2014'],
         ['Subnet Zone', device.subnet_zone || '\u2014'],
+        ['IP History', (device.ip_history || []).join(', ') || '\u2014'],
         ['Open Ports', (device.open_ports || []).join(', ') || '\u2014'],
         ['PoE / Link State', device.poe_state || '\u2014'],
         ['Discovery', (device.discovery_methods || []).join(', ')],
@@ -1263,6 +1499,7 @@
       fields: [
         ['Camera Confidence', `${device.confidence}%`],
         ['Vendor Match', device.vendor],
+        ...(device.persisted ? [['Persisted Observations', String(device.observation_count || 0)], ['Install State', device.installed_status || '\u2014']] : []),
       ]
     });
 

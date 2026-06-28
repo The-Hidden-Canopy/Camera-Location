@@ -1,7 +1,7 @@
 {
   "name": "hidden-canopy-network-discovery",
   "version": "1.0.0",
-  "description": "Vendor-agnostic IP camera discovery tool — Electron desktop wrapper",
+  "description": "Evidence-driven network discovery with camera intelligence - Electron desktop app",
   "main": "electron/main.js",
   "scripts": {
     "stage:python-runtime": "node scripts/stage-python-runtime.js",
@@ -31,11 +31,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "electron/icons/icon.ico",

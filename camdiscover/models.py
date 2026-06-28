@@ -416,6 +416,8 @@ class DiscoveredDevice:
     # addresses appear before recovery.  Never use IP as a join key across
     # scan sessions; use device_id, mac, onvif_uuid, or serial instead.
     device_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    asset_id: str = ""
+    endpoint_id: str = ""
     ip: str = ""
     ip_history: List[str] = field(default_factory=list)   # all IPs ever seen for this device
 
@@ -675,6 +677,8 @@ class DiscoveredDevice:
         return {
             # ── Identity ──────────────────────────────────────────────
             "device_id":         self.device_id,
+            "asset_id":          self.asset_id,
+            "endpoint_id":       self.endpoint_id,
             "ip":                self.ip,
             "ip_history":        self.ip_history,
             "mac":               self.mac,
