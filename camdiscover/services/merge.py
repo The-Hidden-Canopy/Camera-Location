@@ -42,10 +42,15 @@ class MergeService:
         endpoint = None
         if endpoint_id:
             endpoint = self._endpoints.get(endpoint_id)
-            if endpoint:
-                endpoint.asset_id = asset_id
-                self._endpoints.save(endpoint)
-                self._endpoints.deprecate_by_asset(asset_id, keep_endpoint_id=endpoint_id)
+            if not endpoint:
+                raise ValueError("endpoint not found")
+            if endpoint.asset_id:
+                endpoint_asset = self._assets.get(endpoint.asset_id)
+                if not endpoint_asset or endpoint_asset.site_id != site_id:
+                    raise ValueError("endpoint not found at site")
+            endpoint.asset_id = asset_id
+            self._endpoints.save(endpoint)
+            self._endpoints.deprecate_by_asset(asset_id, keep_endpoint_id=endpoint_id)
 
         self._obs.save(Observation(
             observation_id=new_uuid(),
@@ -60,12 +65,12 @@ class MergeService:
 
         return {"asset_id": asset_id, "endpoint_id": endpoint.endpoint_id if endpoint else None}
 
-    def merge_assets(self, keep_asset_id: str, remove_asset_id: str) -> Dict[str, Any]:
+    def merge_assets(self, site_id: str, keep_asset_id: str, remove_asset_id: str) -> Dict[str, Any]:
         """Move all endpoints and observations from `remove_asset_id` to
         `keep_asset_id`, then delete the removed asset."""
         keep = self._assets.get(keep_asset_id)
         remove = self._assets.get(remove_asset_id)
-        if not keep or not remove:
+        if not keep or not remove or keep.site_id != site_id or remove.site_id != site_id:
             raise ValueError("asset not found")
 
         for endpoint in self._endpoints.list_for_asset(remove_asset_id):
@@ -87,14 +92,22 @@ class MergeService:
 
     def split_endpoint_to_asset(self, endpoint_id: str, new_asset_data: Dict[str, Any]) -> Dict[str, Any]:
         """Detach an endpoint from its current asset and give it a new asset identity."""
+        site_id = new_asset_data.get("site_id")
+        if not site_id:
+            raise ValueError("site_id is required")
+
         endpoint = self._endpoints.get(endpoint_id)
         if not endpoint:
             raise ValueError("endpoint not found")
+        if endpoint.asset_id:
+            current_asset = self._assets.get(endpoint.asset_id)
+            if not current_asset or current_asset.site_id != site_id:
+                raise ValueError("endpoint not found at site")
 
         from ..domain.models import CameraAsset
         new_asset = CameraAsset(
             asset_id=new_uuid(),
-            site_id=new_asset_data.get("site_id"),
+            site_id=site_id,
             asset_tag=new_asset_data.get("asset_tag", ""),
             qr_code=new_asset_data.get("qr_code", ""),
             serial=new_asset_data.get("serial", ""),

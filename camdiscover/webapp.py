@@ -752,71 +752,16 @@ def create_app(
 
     @app.route("/api/devices/<ip>/set-ip", methods=["POST"])
     def api_set_ip(ip):
-        """Change a camera's IP address via ONVIF or vendor API."""
-        body = request.json or {}
-        new_ip = body.get("new_ip", "").strip()
-        netmask = body.get("netmask", "255.255.255.0").strip()
-        gateway = body.get("gateway", "").strip()
-        username = body.get("username", "admin")
-        password = body.get("password", "")
+        """Block legacy direct mutation outside the governed change-plan flow."""
+        return jsonify({
+            "error": "direct device mutation is disabled",
+            "required_flow": "/api/change-plans",
+            "detail": (
+                "Use the governed change-plan workflow to propose, approve, ",
+                "and execute network changes with durable scope and audit.",
+            ),
+        }), 410
 
-        if not new_ip:
-            return jsonify({"error": "new_ip is required"}), 400
-        try:
-            ipaddress.IPv4Address(new_ip)
-        except ValueError:
-            return jsonify({"error": f"Invalid IP: {new_ip}"}), 400
-
-        device = orchestrator.devices.get(ip)
-        vendor = (device.vendor if device else "").lower()
-        result = {"ip": ip, "new_ip": new_ip, "success": False, "methods_tried": [], "message": ""}
-
-        # Compute prefix length from netmask
-        try:
-            prefix_len = ipaddress.IPv4Network(f"0.0.0.0/{netmask}", strict=False).prefixlen
-        except Exception:
-            prefix_len = 24
-
-        # 1. Try ONVIF
-        onvif_url = (device.onvif_url if device else "") or f"http://{ip}:8899/onvif/device_service"
-        try:
-            ok, msg = _set_ip_onvif(onvif_url, username, password, new_ip, prefix_len, gateway)
-            result["methods_tried"].append("onvif")
-            if ok:
-                result["success"] = True
-                result["method"] = "onvif"
-                result["message"] = msg
-        except Exception as e:
-            result["onvif_error"] = str(e)
-
-        # 2. Try Hikvision ISAPI
-        if not result["success"] and "hikvision" in vendor:
-            try:
-                ok, msg = _set_ip_hikvision(ip, username, password, new_ip, netmask, gateway)
-                result["methods_tried"].append("hikvision")
-                if ok:
-                    result["success"] = True
-                    result["method"] = "hikvision"
-                    result["message"] = msg
-            except Exception as e:
-                result["hikvision_error"] = str(e)
-
-        # 3. Try Dahua CGI
-        if not result["success"] and any(v in vendor for v in ("dahua", "amcrest")):
-            try:
-                ok, msg = _set_ip_dahua(ip, username, password, new_ip, netmask, gateway)
-                result["methods_tried"].append("dahua")
-                if ok:
-                    result["success"] = True
-                    result["method"] = "dahua"
-                    result["message"] = msg
-            except Exception as e:
-                result["dahua_error"] = str(e)
-
-        if not result["success"] and not result["message"]:
-            result["message"] = "Could not change IP — check credentials and that the camera is reachable"
-
-        return jsonify(result)
 
     @app.route("/api/dpi/checklist")
     def api_dpi_checklist():

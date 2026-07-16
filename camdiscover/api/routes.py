@@ -296,7 +296,7 @@ def merge_assets(site_id: str):
         return jsonify({"error": "keep_asset_id and remove_asset_id required"}), 400
     svc = MergeService(_db())
     try:
-        result = svc.merge_assets(keep, remove)
+        result = svc.merge_assets(site_id, keep, remove)
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     return jsonify(result)

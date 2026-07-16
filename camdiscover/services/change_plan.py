@@ -31,6 +31,9 @@ class ChangePlanService:
         self._jobs = ChangeJobRepo(db)
         self._obs = ObservationRepo(db)
 
+    def get(self, job_id: str, site_id: str) -> ChangeJob:
+        return self._get_job_for_site(job_id, site_id)
+
     def propose(
         self,
         site_id: str,
@@ -107,11 +110,9 @@ class ChangePlanService:
         ))
         return job
 
-    def approve(self, job_id: str, confirmation_phrase: str) -> ChangeJob:
+    def approve(self, job_id: str, site_id: str, confirmation_phrase: str) -> ChangeJob:
         """ operator must type confirmation phrase. """
-        job = self._jobs.get(job_id)
-        if not job:
-            raise ValueError("job not found")
+        job = self._get_job_for_site(job_id, site_id)
         if job.status != "proposed":
             raise ValueError(f"job is {job.status}, cannot approve")
 
@@ -125,7 +126,12 @@ class ChangePlanService:
         self._jobs.save(job)
         return job
 
-    def execute(self, job_id: str, executor: Optional[Any] = None) -> ChangeJob:
+    def execute(
+        self,
+        job_id: str,
+        site_id: str,
+        executor: Optional[Any] = None,
+    ) -> ChangeJob:
         """Execute an approved change plan.
 
         executor must be a callable taking (job, asset, endpoint) and returning:
@@ -133,9 +139,7 @@ class ChangePlanService:
         If executor is None, the plan is marked `manual_recovery` and the actual
         change must be performed outside the app.
         """
-        job = self._jobs.get(job_id)
-        if not job:
-            raise ValueError("job not found")
+        job = self._get_job_for_site(job_id, site_id)
         if job.status != "approved":
             raise ValueError(f"job is {job.status}, cannot execute")
 
@@ -195,6 +199,12 @@ class ChangePlanService:
             weight=0,
         ))
 
+        return job
+
+    def _get_job_for_site(self, job_id: str, site_id: str) -> ChangeJob:
+        job = self._jobs.get(job_id)
+        if not job or job.site_id != site_id:
+            raise ValueError("job not found at site")
         return job
 
     def _validate(

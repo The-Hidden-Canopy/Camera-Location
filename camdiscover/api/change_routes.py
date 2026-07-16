@@ -10,6 +10,10 @@ from ..services.change_plan import ChangePlanService
 change_api = Blueprint("change_api", __name__, url_prefix="/api/change-plans")
 
 
+def _status_for_error(message: str) -> int:
+    return 404 if "not found" in message else 400
+
+
 @change_api.route("", methods=["POST"])
 def propose_change():
     body = request.json or {}
@@ -31,28 +35,43 @@ def propose_change():
 @change_api.route("/<job_id>/approve", methods=["POST"])
 def approve_change(job_id: str):
     body = request.json or {}
+    site_id = body.get("site_id")
+    if not site_id:
+        return jsonify({"error": "site_id is required"}), 400
     try:
-        job = ChangePlanService(get_database()).approve(job_id, body.get("confirmation_phrase", ""))
+        job = ChangePlanService(get_database()).approve(
+            job_id,
+            site_id,
+            body.get("confirmation_phrase", ""),
+        )
     except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error": str(e)}), _status_for_error(str(e))
     return jsonify(job.to_dict())
 
 
 @change_api.route("/<job_id>/execute", methods=["POST"])
 def execute_change(job_id: str):
+    body = request.json or {}
+    site_id = body.get("site_id")
+    if not site_id:
+        return jsonify({"error": "site_id is required"}), 400
     svc = ChangePlanService(get_database())
     try:
-        job = svc.execute(job_id)
+        job = svc.execute(job_id, site_id)
     except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error": str(e)}), _status_for_error(str(e))
     return jsonify(job.to_dict())
 
 
 @change_api.route("/<job_id>", methods=["GET"])
 def get_change(job_id: str):
-    job = ChangePlanService(get_database())._jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "not found"}), 404
+    site_id = request.args.get("site_id")
+    if not site_id:
+        return jsonify({"error": "site_id is required"}), 400
+    try:
+        job = ChangePlanService(get_database()).get(job_id, site_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), _status_for_error(str(e))
     return jsonify(job.to_dict())
 
 
