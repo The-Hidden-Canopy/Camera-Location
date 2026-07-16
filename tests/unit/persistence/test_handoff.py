@@ -44,6 +44,7 @@ def test_location_verification():
     assert result["installed_status"] == "verified"
     asset = AssetRepo(db).get(asset.asset_id)
     assert asset.installed_status == "verified"
+    assert asset.human_confirmed is True
     assert asset.expected_location_id == result["location_id"]
 
 
@@ -63,6 +64,9 @@ def test_handoff_roundtrip():
     asset = CameraAsset(asset_id=str(uuid.uuid4()), site_id=site.site_id,
                         asset_tag="CAM-01", serial="SN-HANDOFF-1",
                         manufacturer="Hikvision", model="DS-2CD2347",
+                        asset_class="camera", operational_role="camera_endpoint",
+                        criticality="normal", reset_risk="moderate",
+                        human_confirmed=True,
                         expected_location_id=loc.location_id,
                         installed_status="verified")
     AssetRepo(db).save(asset)
@@ -82,6 +86,9 @@ def test_handoff_roundtrip():
     imported_assets = AssetRepo(db2).list_for_site(imported)
     assert len(imported_assets) == 1
     assert imported_assets[0].serial == "SN-HANDOFF-1"
+    assert imported_assets[0].asset_class == "camera"
+    assert imported_assets[0].operational_role == "camera_endpoint"
+    assert imported_assets[0].human_confirmed is True
     assert imported_assets[0].expected_location_id is not None
 
 

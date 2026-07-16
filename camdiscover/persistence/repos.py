@@ -72,18 +72,44 @@ class SiteRepo:
         updated = _now()
         with self._db.conn:
             self._db.conn.execute(
-                """INSERT INTO sites(site_id, name, customer, address, local_coords, notes,
+                """INSERT INTO sites(site_id, name, customer, address, local_coords,
+                                    authorized_classes, expected_camera_count,
+                                    expected_nvr_channels, expected_subnets,
+                                    expected_gateways, known_old_subnets,
+                                    unauthorized_device_alerts, notes,
                                     created_at, updated_at)
-                   VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(site_id) DO UPDATE SET
                       name=excluded.name,
                       customer=excluded.customer,
                       address=excluded.address,
                       local_coords=excluded.local_coords,
+                      authorized_classes=excluded.authorized_classes,
+                      expected_camera_count=excluded.expected_camera_count,
+                      expected_nvr_channels=excluded.expected_nvr_channels,
+                      expected_subnets=excluded.expected_subnets,
+                      expected_gateways=excluded.expected_gateways,
+                      known_old_subnets=excluded.known_old_subnets,
+                      unauthorized_device_alerts=excluded.unauthorized_device_alerts,
                       notes=excluded.notes,
                       updated_at=excluded.updated_at""",
-                (site.site_id, site.name, site.customer, site.address,
-                 site.local_coords, site.notes, created, updated)
+                (
+                    site.site_id,
+                    site.name,
+                    site.customer,
+                    site.address,
+                    site.local_coords,
+                    _json(site.authorized_classes),
+                    int(site.expected_camera_count),
+                    int(site.expected_nvr_channels),
+                    _json(site.expected_subnets),
+                    _json(site.expected_gateways),
+                    _json(site.known_old_subnets),
+                    int(site.unauthorized_device_alerts),
+                    site.notes,
+                    created,
+                    updated,
+                )
             )
         return site
 
@@ -99,6 +125,13 @@ class SiteRepo:
             customer=row["customer"] or "",
             address=row["address"] or "",
             local_coords=row["local_coords"] or "",
+            authorized_classes=_load_json(row["authorized_classes"]),
+            expected_camera_count=int(row["expected_camera_count"] or 0),
+            expected_nvr_channels=int(row["expected_nvr_channels"] or 0),
+            expected_subnets=_load_json(row["expected_subnets"]),
+            expected_gateways=_load_json(row["expected_gateways"]),
+            known_old_subnets=_load_json(row["known_old_subnets"]),
+            unauthorized_device_alerts=bool(row["unauthorized_device_alerts"]),
             notes=row["notes"] or "",
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),
@@ -112,6 +145,13 @@ class SiteRepo:
             Site(
                 site_id=r["site_id"], name=r["name"], customer=r["customer"] or "",
                 address=r["address"] or "", local_coords=r["local_coords"] or "",
+                authorized_classes=_load_json(r["authorized_classes"]),
+                expected_camera_count=int(r["expected_camera_count"] or 0),
+                expected_nvr_channels=int(r["expected_nvr_channels"] or 0),
+                expected_subnets=_load_json(r["expected_subnets"]),
+                expected_gateways=_load_json(r["expected_gateways"]),
+                known_old_subnets=_load_json(r["known_old_subnets"]),
+                unauthorized_device_alerts=bool(r["unauthorized_device_alerts"]),
                 notes=r["notes"] or "",
                 created_at=_parse_dt(r["created_at"]),
                 updated_at=_parse_dt(r["updated_at"]),
@@ -264,21 +304,30 @@ class AssetRepo:
             self._db.conn.execute(
                 """INSERT INTO camera_assets(asset_id, site_id, asset_tag, qr_code,
                                                 serial, manufacturer, model, hardware_id,
-                                                onvif_uuid, installed_status, expected_location_id,
+                                                onvif_uuid, asset_class, operational_role,
+                                                criticality, reset_risk, human_confirmed,
+                                                installed_status, expected_location_id,
                                                 notes, created_at, updated_at)
-                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(asset_id) DO UPDATE SET
                       site_id=excluded.site_id,
                       asset_tag=excluded.asset_tag, qr_code=excluded.qr_code,
                       serial=excluded.serial, manufacturer=excluded.manufacturer,
                       model=excluded.model, hardware_id=excluded.hardware_id,
                       onvif_uuid=excluded.onvif_uuid,
+                      asset_class=excluded.asset_class,
+                      operational_role=excluded.operational_role,
+                      criticality=excluded.criticality,
+                      reset_risk=excluded.reset_risk,
+                      human_confirmed=excluded.human_confirmed,
                       installed_status=excluded.installed_status,
                       expected_location_id=excluded.expected_location_id,
                       notes=excluded.notes, updated_at=excluded.updated_at""",
                 (asset.asset_id, asset.site_id, asset.asset_tag, asset.qr_code,
                  asset.serial, asset.manufacturer, asset.model, asset.hardware_id,
-                 asset.onvif_uuid, asset.installed_status, asset.expected_location_id,
+                 asset.onvif_uuid, asset.asset_class, asset.operational_role,
+                 asset.criticality, asset.reset_risk, int(asset.human_confirmed),
+                 asset.installed_status, asset.expected_location_id,
                  asset.notes, created, updated)
             )
         return asset
@@ -343,6 +392,11 @@ class AssetRepo:
             model=row["model"] or "",
             hardware_id=row["hardware_id"] or "",
             onvif_uuid=row["onvif_uuid"] or "",
+            asset_class=row["asset_class"] or "unknown_endpoint",
+            operational_role=row["operational_role"] or "unknown",
+            criticality=row["criticality"] or "normal",
+            reset_risk=row["reset_risk"] or "moderate",
+            human_confirmed=bool(row["human_confirmed"]),
             installed_status=row["installed_status"] or "planned",
             expected_location_id=row["expected_location_id"],
             notes=row["notes"] or "",

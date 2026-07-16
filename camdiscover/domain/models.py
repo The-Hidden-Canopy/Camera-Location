@@ -27,6 +27,13 @@ class Site:
     customer: str = ""
     address: str = ""
     local_coords: str = ""
+    authorized_classes: List[str] = field(default_factory=list)
+    expected_camera_count: int = 0
+    expected_nvr_channels: int = 0
+    expected_subnets: List[str] = field(default_factory=list)
+    expected_gateways: List[str] = field(default_factory=list)
+    known_old_subnets: List[str] = field(default_factory=list)
+    unauthorized_device_alerts: bool = True
     notes: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -38,6 +45,13 @@ class Site:
             "customer":   self.customer,
             "address":    self.address,
             "local_coords": self.local_coords,
+            "authorized_classes": self.authorized_classes,
+            "expected_camera_count": self.expected_camera_count,
+            "expected_nvr_channels": self.expected_nvr_channels,
+            "expected_subnets": self.expected_subnets,
+            "expected_gateways": self.expected_gateways,
+            "known_old_subnets": self.known_old_subnets,
+            "unauthorized_device_alerts": self.unauthorized_device_alerts,
             "notes":      self.notes,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
@@ -121,6 +135,11 @@ class CameraAsset:
     model: str = ""
     hardware_id: str = ""
     onvif_uuid: str = ""
+    asset_class: str = "unknown_endpoint"
+    operational_role: str = "unknown"
+    criticality: str = "normal"
+    reset_risk: str = "moderate"
+    human_confirmed: bool = False
     installed_status: str = "planned"
     expected_location_id: Optional[str] = None
     notes: str = ""
@@ -138,6 +157,11 @@ class CameraAsset:
             "model":            self.model,
             "hardware_id":      self.hardware_id,
             "onvif_uuid":       self.onvif_uuid,
+            "asset_class":      self.asset_class,
+            "operational_role": self.operational_role,
+            "criticality":      self.criticality,
+            "reset_risk":       self.reset_risk,
+            "human_confirmed":  self.human_confirmed,
             "installed_status": self.installed_status,
             "expected_location_id": self.expected_location_id,
             "notes":            self.notes,

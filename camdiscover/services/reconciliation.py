@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..asset_taxonomy import infer_criticality, infer_reset_risk
 from ..domain.models import CameraAsset, DeviceEndpoint, Observation
 from ..models import DiscoveredDevice, Evidence
 from ..persistence.db import Database, new_uuid
@@ -307,6 +308,7 @@ class ReconciliationService:
         device: DiscoveredDevice,
         site_id: Optional[str],
     ) -> CameraAsset:
+        reset_risk = infer_reset_risk(device.asset_class, device.reset_risk)
         asset = CameraAsset(
             asset_id=new_uuid(),
             site_id=site_id,
@@ -314,6 +316,11 @@ class ReconciliationService:
             manufacturer=device.vendor if device.vendor != "Unknown" else "",
             model=device.model,
             onvif_uuid=(device.onvif_uuid or "").strip(),
+            asset_class=device.asset_class,
+            operational_role=device.operational_role,
+            criticality=infer_criticality(device.asset_class, reset_risk),
+            reset_risk=reset_risk,
+            human_confirmed=False,
             installed_status="unverified",
             notes="Created automatically from discovery evidence.",
         )
@@ -327,6 +334,8 @@ class ReconciliationService:
         site_id: Optional[str],
     ) -> CameraAsset:
         changed = False
+        reset_risk = infer_reset_risk(device.asset_class, device.reset_risk)
+        criticality = infer_criticality(device.asset_class, reset_risk)
         if site_id and not asset.site_id:
             asset.site_id = site_id
             changed = True
@@ -341,6 +350,18 @@ class ReconciliationService:
             changed = True
         if device.model and not asset.model:
             asset.model = device.model
+            changed = True
+        if (not asset.asset_class or asset.asset_class == "unknown_endpoint") and device.asset_class:
+            asset.asset_class = device.asset_class
+            changed = True
+        if (not asset.operational_role or asset.operational_role == "unknown") and device.operational_role:
+            asset.operational_role = device.operational_role
+            changed = True
+        if (not asset.criticality or asset.criticality == "normal") and criticality != asset.criticality:
+            asset.criticality = criticality
+            changed = True
+        if (not asset.reset_risk or asset.reset_risk == "moderate") and reset_risk != asset.reset_risk:
+            asset.reset_risk = reset_risk
             changed = True
         if changed:
             self._assets.save(asset)

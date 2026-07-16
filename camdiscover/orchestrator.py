@@ -2239,7 +2239,12 @@ class DiscoveryOrchestrator:
         )
         device.device_class = result.device_type
         device.warn_reset = result.warn_reset
+        device.reset_risk = result.reset_risk or device.reset_risk
         device.classification_rationale = result.rationale
+        device.asset_class_override = result.asset_class
+        device.operational_role_override = result.operational_role
+        device.criticality_override = result.criticality
+        device.classification_signals = list(result.evidence or [])
 
     # ─── Subnet Watch (Wireshark-inspired) ───────────────────────────
     # Any subnet we observe in live traffic gets automatically configured

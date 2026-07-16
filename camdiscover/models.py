@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from .asset_taxonomy import infer_asset_class, infer_criticality, infer_operational_role
+
 
 # ─── Evidence ─────────────────────────────────────────────────────────────────
 #
@@ -492,6 +494,12 @@ class DiscoveredDevice:
     # Human-readable explanation of why this classification was chosen
     classification_rationale: str = ""
 
+    # Rich classifier outputs layered over the legacy device_class bucket.
+    asset_class_override: str = ""
+    operational_role_override: str = ""
+    criticality_override: str = ""
+    classification_signals: List[str] = field(default_factory=list)
+
     def __post_init__(self):
         # Per-device lock so concurrent fingerprint threads don't corrupt evidence list
         object.__setattr__(self, '_evidence_lock', threading.Lock())
@@ -623,6 +631,58 @@ class DiscoveredDevice:
         return self.device_class or "unknown"
 
     @property
+    def asset_class(self) -> str:
+        if self.asset_class_override:
+            return self.asset_class_override
+        return infer_asset_class(
+            self.device_class,
+            vendor=self.vendor,
+            model=self.model,
+            hostname=self.hostname,
+        )
+
+    @property
+    def operational_role(self) -> str:
+        if self.operational_role_override:
+            return self.operational_role_override
+        return infer_operational_role(
+            self.asset_class,
+            vendor=self.vendor,
+            model=self.model,
+            hostname=self.hostname,
+        )
+
+    @property
+    def criticality(self) -> str:
+        if self.criticality_override:
+            return self.criticality_override
+        return infer_criticality(self.asset_class, self.effective_reset_risk)
+
+    @property
+    def classification_evidence(self) -> List[str]:
+        evidence: List[str] = list(self.classification_signals)
+        if self.vendor and self.vendor != "Unknown":
+            item = f"vendor={self.vendor}"
+            if item not in evidence:
+                evidence.append(item)
+        if self.model:
+            item = f"model={self.model}"
+            if item not in evidence:
+                evidence.append(item)
+        if self.hostname:
+            item = f"hostname={self.hostname}"
+            if item not in evidence:
+                evidence.append(item)
+        if self.classification_rationale:
+            if self.classification_rationale not in evidence:
+                evidence.append(self.classification_rationale)
+        if self.camera_confidence:
+            item = f"camera_confidence={self.camera_confidence}"
+            if item not in evidence:
+                evidence.append(item)
+        return evidence
+
+    @property
     def device_type_confidence(self) -> int:
         if self.device_type == "camera":
             return self.camera_confidence
@@ -718,6 +778,10 @@ class DiscoveredDevice:
             "device_type_confidence": self.device_type_confidence,
             "warn_reset":        self.warn_reset,
             "reset_risk":        self.effective_reset_risk,
+            "asset_class":       self.asset_class,
+            "operational_role":  self.operational_role,
+            "criticality":       self.criticality,
+            "classification_evidence": self.classification_evidence,
             "suspected_old_gateway": self.suspected_old_gateway,
             "poe_state":         self.poe_state,
             "notes":             self.notes,

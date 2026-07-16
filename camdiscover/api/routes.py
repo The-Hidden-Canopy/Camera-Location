@@ -140,6 +140,7 @@ def verify_asset_location(site_id: str, asset_id: str):
         if not loc or loc.site_id != site_id:
             return jsonify({"error": "location not found"}), 404
         asset.expected_location_id = location_id
+        asset.human_confirmed = True
         asset.installed_status = "verified"
         asset_repo.save(asset)
 

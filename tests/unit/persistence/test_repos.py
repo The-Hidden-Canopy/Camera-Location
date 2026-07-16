@@ -63,10 +63,28 @@ def test_migration_creates_tables():
 def test_site_roundtrip():
     db = _mem_db()
     repo = SiteRepo(db)
-    site = _make_site()
+    site = Site(
+        site_id=str(uuid.uuid4()),
+        name="Test Farm",
+        customer="Acme",
+        authorized_classes=["camera", "nvr", "poe_switch", "wireless_bridge"],
+        expected_camera_count=24,
+        expected_nvr_channels=32,
+        expected_subnets=["192.168.88.0/24", "10.32.57.0/24"],
+        expected_gateways=["192.168.88.1", "10.32.57.1"],
+        known_old_subnets=["192.168.1.0/24"],
+        unauthorized_device_alerts=True,
+    )
     repo.save(site)
     loaded = repo.get(site.site_id)
     assert loaded and loaded.name == site.name
+    assert loaded.authorized_classes == ["camera", "nvr", "poe_switch", "wireless_bridge"]
+    assert loaded.expected_camera_count == 24
+    assert loaded.expected_nvr_channels == 32
+    assert loaded.expected_subnets == ["192.168.88.0/24", "10.32.57.0/24"]
+    assert loaded.expected_gateways == ["192.168.88.1", "10.32.57.1"]
+    assert loaded.known_old_subnets == ["192.168.1.0/24"]
+    assert loaded.unauthorized_device_alerts is True
 
 
 def test_network_profile_for_site():
@@ -118,11 +136,19 @@ def test_asset_and_endpoint_identity():
         serial="SN12345",
         manufacturer="Hikvision",
         model="DS-2CD2347G2-LU",
+        asset_class="camera",
+        operational_role="camera_endpoint",
+        criticality="normal",
+        reset_risk="moderate",
+        human_confirmed=False,
     )
     asset_repo.save(asset)
 
     found_by_serial = asset_repo.find_by_serial(site.site_id, "SN12345")
     assert found_by_serial and found_by_serial.asset_id == asset.asset_id
+    assert found_by_serial.asset_class == "camera"
+    assert found_by_serial.operational_role == "camera_endpoint"
+    assert found_by_serial.reset_risk == "moderate"
 
     endpoint = DeviceEndpoint(
         endpoint_id=str(uuid.uuid4()),

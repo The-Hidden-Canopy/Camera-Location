@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ..asset_taxonomy import infer_asset_class, infer_criticality, infer_operational_role, infer_reset_risk
 from ..persistence.db import Database
 from ..persistence.repos import AssetRepo, EndpointRepo, ObservationRepo
 from ..domain.models import Observation
@@ -105,6 +106,8 @@ class MergeService:
                 raise ValueError("endpoint not found at site")
 
         from ..domain.models import CameraAsset
+        asset_class = new_asset_data.get("asset_class") or infer_asset_class(endpoint.device_class)
+        reset_risk = new_asset_data.get("reset_risk") or infer_reset_risk(asset_class)
         new_asset = CameraAsset(
             asset_id=new_uuid(),
             site_id=site_id,
@@ -114,6 +117,11 @@ class MergeService:
             manufacturer=new_asset_data.get("manufacturer", ""),
             model=new_asset_data.get("model", ""),
             onvif_uuid=new_asset_data.get("onvif_uuid", ""),
+            asset_class=asset_class,
+            operational_role=new_asset_data.get("operational_role") or infer_operational_role(asset_class),
+            criticality=new_asset_data.get("criticality") or infer_criticality(asset_class, reset_risk),
+            reset_risk=reset_risk,
+            human_confirmed=bool(new_asset_data.get("human_confirmed", False)),
             installed_status="unverified",
             notes="Created by operator split during reconciliation.",
         )

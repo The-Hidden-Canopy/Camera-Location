@@ -60,6 +60,31 @@ def test_reconcile_unknown_creates_asset_and_endpoint():
     assert endpoint.asset_id == asset.asset_id
     assert endpoint.ip == "192.168.88.34"
     assert outcome == "new_asset_created"
+    assert asset.asset_class == "camera"
+    assert asset.operational_role == "camera_endpoint"
+    assert asset.reset_risk == "moderate"
+
+
+def test_reconcile_infrastructure_asset_sets_role_and_risk():
+    db = _mem_db()
+    site = _make_site(SiteRepo(db))
+    svc = ReconciliationService(db)
+    dev = _device(
+        vendor="Ubiquiti",
+        model="NanoBeam M5",
+        serial="",
+        onvif_uuid="",
+        device_class="bridge",
+    )
+    endpoint, asset, outcome = svc.reconcile_device(dev, site_id=site.site_id)
+
+    assert outcome == "new_asset_created"
+    assert asset is not None
+    assert endpoint.asset_id == asset.asset_id
+    assert asset.asset_class == "wireless_bridge"
+    assert asset.operational_role == "remote_bridge"
+    assert asset.criticality == "critical"
+    assert asset.reset_risk == "critical"
 
 
 def test_reconcile_serial_match_returns_existing_asset():

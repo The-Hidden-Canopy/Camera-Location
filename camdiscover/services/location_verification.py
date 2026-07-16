@@ -92,6 +92,7 @@ class LocationVerificationService:
         if qr and not asset.qr_code:
             asset.qr_code = qr.strip()
 
+        asset.human_confirmed = True
         asset.installed_status = "verified"
         self._assets.save(asset)
 
