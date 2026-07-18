@@ -550,16 +550,35 @@ def create_app(
                 break
             else:
                 onvif_url = f"http://{ip}:80/onvif/device_service"
-        from .discovery import query_onvif_device_info
-        info = query_onvif_device_info(ip, onvif_url, username, password)
+        from .discovery import query_onvif_device_audit
+        audit = query_onvif_device_audit(ip, onvif_url, username, password)
         return jsonify({
-            "manufacturer": info.manufacturer,
-            "model": info.model,
-            "firmware": info.firmware,
-            "serial": info.serial,
-            "hardware_id": info.hardware_id,
-            "stream_uris": info.stream_uris,
-            "error": info.error,
+            "manufacturer": audit.manufacturer,
+            "model": audit.model,
+            "firmware": audit.firmware,
+            "serial": audit.serial,
+            "hardware_id": audit.hardware_id,
+            "stream_uris": audit.stream_uris,
+            "snapshot_uris": audit.snapshot_uris,
+            "scopes": audit.scopes,
+            "services": audit.services,
+            "capabilities": audit.capabilities,
+            "media_profile_tokens": audit.media_profile_tokens,
+            "service_urls": audit.service_urls,
+            "reported_ipv4_addresses": audit.reported_ipv4_addresses,
+            "default_gateways": audit.default_gateways,
+            "dns_servers": audit.dns_servers,
+            "ntp_servers": audit.ntp_servers,
+            "system_datetime": audit.system_datetime,
+            "user_count": audit.user_count,
+            "supports_device": audit.supports_device,
+            "supports_media": audit.supports_media,
+            "supports_events": audit.supports_events,
+            "supports_imaging": audit.supports_imaging,
+            "supports_ptz": audit.supports_ptz,
+            "supports_analytics": audit.supports_analytics,
+            "checks": audit.checks,
+            "error": audit.error,
         })
 
     # ─── Snapshot Proxy ───────────────────────────────────────────────

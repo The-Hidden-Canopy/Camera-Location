@@ -500,6 +500,9 @@ def _onvif_soap(url: str, username: str, password: str, body_xml: str,
         '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"'
         ' xmlns:tds="http://www.onvif.org/ver10/device/wsdl"'
         ' xmlns:trt="http://www.onvif.org/ver10/media/wsdl"'
+        ' xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"'
+        ' xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"'
+        ' xmlns:tev="http://www.onvif.org/ver10/events/wsdl"'
         ' xmlns:tt="http://www.onvif.org/ver10/schema">'
         f'{security_header}'
         f'<s:Body>{body_xml}</s:Body>'
@@ -528,71 +531,259 @@ class OnvifDeviceInfo:
     error: str = ""
 
 
-def query_onvif_device_info(ip: str, onvif_url: str = "",
-                             username: str = "admin", password: str = "") -> OnvifDeviceInfo:
-    """
-    Like ODM's device detail panel: fetch manufacturer, model, firmware,
-    serial number, and real RTSP stream URIs via ONVIF SOAP calls.
-    """
+@dataclass
+class OnvifDeviceAudit:
+    manufacturer: str = ""
+    model: str = ""
+    firmware: str = ""
+    serial: str = ""
+    hardware_id: str = ""
+    stream_uris: List[str] = field(default_factory=list)
+    snapshot_uris: List[str] = field(default_factory=list)
+    scopes: List[str] = field(default_factory=list)
+    services: List[str] = field(default_factory=list)
+    capabilities: List[str] = field(default_factory=list)
+    media_profile_tokens: List[str] = field(default_factory=list)
+    service_urls: Dict[str, str] = field(default_factory=dict)
+    reported_ipv4_addresses: List[str] = field(default_factory=list)
+    default_gateways: List[str] = field(default_factory=list)
+    dns_servers: List[str] = field(default_factory=list)
+    ntp_servers: List[str] = field(default_factory=list)
+    system_datetime: str = ""
+    user_count: int = 0
+    supports_device: bool = False
+    supports_media: bool = False
+    supports_events: bool = False
+    supports_imaging: bool = False
+    supports_ptz: bool = False
+    supports_analytics: bool = False
+    checks: Dict[str, bool] = field(default_factory=dict)
+    error: str = ""
+
+
+def _xml_text(xml: str, tag: str) -> str:
+    match = re.search(rf"<(?:\w+:)?{re.escape(tag)}[^>]*>(.*?)</(?:\w+:)?{re.escape(tag)}>", xml, re.DOTALL)
+    if not match:
+        return ""
+    return re.sub(r"<[^>]+>", "", match.group(1)).strip()
+
+
+def _xml_texts(xml: str, tag: str) -> List[str]:
+    values: List[str] = []
+    for match in re.finditer(rf"<(?:\w+:)?{re.escape(tag)}[^>]*>(.*?)</(?:\w+:)?{re.escape(tag)}>", xml, re.DOTALL):
+        value = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def _canonical_onvif_service(namespace: str) -> str:
+    ns = (namespace or "").lower()
+    if "device/wsdl" in ns:
+        return "device"
+    if "media/wsdl" in ns:
+        return "media"
+    if "events/wsdl" in ns:
+        return "events"
+    if "imaging/wsdl" in ns:
+        return "imaging"
+    if "ptz/wsdl" in ns:
+        return "ptz"
+    if "analytics/wsdl" in ns:
+        return "analytics"
+    return ""
+
+
+def _candidate_service_urls(ip: str, onvif_url: str, service_urls: Dict[str, str], service_name: str) -> List[str]:
+    candidates: List[str] = []
+    explicit = service_urls.get(service_name, "")
+    if explicit:
+        candidates.append(explicit)
+    if "device_service" in onvif_url:
+        candidates.append(onvif_url.replace("device_service", f"{service_name}_service"))
+    for port in (8899, 80, 8080):
+        candidates.append(f"http://{ip}:{port}/onvif/{service_name}_service")
+    unique: List[str] = []
+    for item in candidates:
+        if item and item not in unique:
+            unique.append(item)
+    return unique
+
+
+def _record_support(audit: OnvifDeviceAudit) -> None:
+    services = set(audit.services)
+    caps = set(audit.capabilities)
+    audit.supports_device = "device" in services or "device" in caps
+    audit.supports_media = "media" in services or "media" in caps or bool(audit.media_profile_tokens)
+    audit.supports_events = "events" in services or "events" in caps
+    audit.supports_imaging = "imaging" in services or "imaging" in caps
+    audit.supports_ptz = "ptz" in services or "ptz" in caps
+    audit.supports_analytics = "analytics" in services or "analytics" in caps
+
+
+def query_onvif_device_audit(
+    ip: str,
+    onvif_url: str = "",
+    username: str = "admin",
+    password: str = "",
+) -> OnvifDeviceAudit:
+    """Run an ODM-style ONVIF capability audit against a discovered device."""
     if not onvif_url:
         onvif_url = f"http://{ip}:8899/onvif/device_service"
 
-    info = OnvifDeviceInfo()
+    audit = OnvifDeviceAudit()
 
-    # ── GetDeviceInformation ─────────────────────────────────────────
-    try:
-        resp = _onvif_soap(onvif_url, username, password,
-                           "<tds:GetDeviceInformation/>")
-        def _tag(name: str) -> str:
-            m = re.search(rf"<[^>]*{re.escape(name)}[^>]*>([^<]+)<", resp)
-            return m.group(1).strip() if m else ""
-        info.manufacturer = _tag("Manufacturer")
-        info.model        = _tag("Model")
-        info.firmware     = _tag("FirmwareVersion")
-        info.serial       = _tag("SerialNumber")
-        info.hardware_id  = _tag("HardwareId")
-    except Exception as e:
-        info.error = str(e)
-        return info
+    def _call(check_name: str, url: str, body_xml: str) -> str:
+        try:
+            response = _onvif_soap(url, username, password, body_xml)
+            audit.checks[check_name] = True
+            return response
+        except Exception as exc:
+            audit.checks[check_name] = False
+            if not audit.error and check_name == "get_device_information":
+                audit.error = str(exc)
+            return ""
 
-    # ── GetProfiles + GetStreamUri ────────────────────────────────────
-    try:
-        media_url = onvif_url.replace("device_service", "media_service")
-        # Try common media service paths
-        for media_path in (media_url, f"http://{ip}:8899/onvif/media_service",
-                           f"http://{ip}:80/onvif/media_service",
-                           f"http://{ip}:8080/onvif/media_service"):
-            try:
-                profiles_resp = _onvif_soap(media_path, username, password,
-                                            "<trt:GetProfiles/>")
-                tokens = re.findall(r'token="([^"]+)"', profiles_resp)
-                for token in tokens[:4]:   # fetch up to 4 profiles
-                    try:
-                        stream_resp = _onvif_soap(
-                            media_path, username, password,
-                            f'<trt:GetStreamUri>'
-                            f'  <trt:StreamSetup>'
-                            f'    <tt:Stream>RTP-Unicast</tt:Stream>'
-                            f'    <tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport>'
-                            f'  </trt:StreamSetup>'
-                            f'  <trt:ProfileToken>{token}</trt:ProfileToken>'
-                            f'</trt:GetStreamUri>',
-                        )
-                        uri_m = re.search(r"<[^>]*Uri[^>]*>([^<]+)<", stream_resp)
-                        if uri_m:
-                            uri = uri_m.group(1).strip()
-                            if uri.startswith("rtsp://") and uri not in info.stream_uris:
-                                info.stream_uris.append(uri)
-                    except Exception:
-                        pass
-                if tokens:
+    device_info_resp = _call("get_device_information", onvif_url, "<tds:GetDeviceInformation/>")
+    if not device_info_resp:
+        return audit
+
+    audit.manufacturer = _xml_text(device_info_resp, "Manufacturer")
+    audit.model = _xml_text(device_info_resp, "Model")
+    audit.firmware = _xml_text(device_info_resp, "FirmwareVersion")
+    audit.serial = _xml_text(device_info_resp, "SerialNumber")
+    audit.hardware_id = _xml_text(device_info_resp, "HardwareId")
+
+    services_resp = _call("get_services", onvif_url, "<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>")
+    if services_resp:
+        for block in re.findall(r"<(?:\w+:)?Service\b[^>]*>(.*?)</(?:\w+:)?Service>", services_resp, re.DOTALL):
+            namespace = _xml_text(block, "Namespace")
+            xaddr = _xml_text(block, "XAddr")
+            canonical = _canonical_onvif_service(namespace)
+            if canonical:
+                if canonical not in audit.services:
+                    audit.services.append(canonical)
+                if xaddr:
+                    audit.service_urls[canonical] = xaddr
+
+    capabilities_resp = _call("get_capabilities", onvif_url, "<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>")
+    if capabilities_resp:
+        for capability_name in ("device", "media", "events", "imaging", "ptz", "analytics"):
+            if re.search(rf"<(?:\w+:)?{capability_name.capitalize()}\b", capabilities_resp, re.IGNORECASE):
+                audit.capabilities.append(capability_name)
+
+    scopes_resp = _call("get_scopes", onvif_url, "<tds:GetScopes/>")
+    if scopes_resp:
+        audit.scopes = _xml_texts(scopes_resp, "ScopeItem")
+
+    network_resp = _call("get_network_interfaces", onvif_url, "<tds:GetNetworkInterfaces/>")
+    if network_resp:
+        audit.reported_ipv4_addresses = _xml_texts(network_resp, "IPv4Address")
+
+    gateway_resp = _call("get_network_default_gateway", onvif_url, "<tds:GetNetworkDefaultGateway/>")
+    if gateway_resp:
+        audit.default_gateways = _xml_texts(gateway_resp, "IPv4Address")
+
+    dns_resp = _call("get_dns", onvif_url, "<tds:GetDNS/>")
+    if dns_resp:
+        audit.dns_servers = _xml_texts(dns_resp, "IPv4Address")
+
+    ntp_resp = _call("get_ntp", onvif_url, "<tds:GetNTP/>")
+    if ntp_resp:
+        audit.ntp_servers = _xml_texts(ntp_resp, "IPv4Address")
+
+    dt_resp = _call("get_system_date_and_time", onvif_url, "<tds:GetSystemDateAndTime/>")
+    if dt_resp:
+        year = _xml_text(dt_resp, "Year")
+        month = _xml_text(dt_resp, "Month")
+        day = _xml_text(dt_resp, "Day")
+        hour = _xml_text(dt_resp, "Hour")
+        minute = _xml_text(dt_resp, "Minute")
+        second = _xml_text(dt_resp, "Second")
+        if all((year, month, day, hour, minute, second)):
+            audit.system_datetime = f"{year.zfill(4)}-{month.zfill(2)}-{day.zfill(2)}T{hour.zfill(2)}:{minute.zfill(2)}:{second.zfill(2)}"
+
+    users_resp = _call("get_users", onvif_url, "<tds:GetUsers/>")
+    if users_resp:
+        audit.user_count = len(re.findall(r"<(?:\w+:)?User\b", users_resp))
+
+    media_urls = _candidate_service_urls(ip, onvif_url, audit.service_urls, "media")
+    profiles_resp = ""
+    media_url = ""
+    for candidate in media_urls:
+        profiles_resp = _call("get_profiles", candidate, "<trt:GetProfiles/>")
+        if profiles_resp:
+            media_url = candidate
+            audit.service_urls.setdefault("media", candidate)
+            break
+    if profiles_resp:
+        audit.media_profile_tokens = re.findall(
+            r'<(?:\w+:)?Profiles\b[^>]*token="([^"]+)"',
+            profiles_resp,
+        )[:8]
+        video_source_tokens = re.findall(r'VideoSourceConfiguration[^>]*token="([^"]+)"', profiles_resp)
+        for token in audit.media_profile_tokens[:4]:
+            stream_resp = _call(
+                f"get_stream_uri:{token}",
+                media_url,
+                f"<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>{token}</trt:ProfileToken></trt:GetStreamUri>",
+            )
+            uri = _xml_text(stream_resp, "Uri")
+            if uri.startswith("rtsp://") and uri not in audit.stream_uris:
+                audit.stream_uris.append(uri)
+
+            snapshot_resp = _call(
+                f"get_snapshot_uri:{token}",
+                media_url,
+                f"<trt:GetSnapshotUri><trt:ProfileToken>{token}</trt:ProfileToken></trt:GetSnapshotUri>",
+            )
+            snapshot_uri = _xml_text(snapshot_resp, "Uri")
+            if snapshot_uri and snapshot_uri not in audit.snapshot_uris:
+                audit.snapshot_uris.append(snapshot_uri)
+
+        _call("get_video_encoder_configurations", media_url, "<trt:GetVideoEncoderConfigurations/>")
+
+        ptz_url = audit.service_urls.get("ptz") or media_url
+        _call("get_ptz_configurations", ptz_url, "<tptz:GetConfigurations/>")
+
+        imaging_urls = _candidate_service_urls(ip, onvif_url, audit.service_urls, "imaging")
+        if video_source_tokens:
+            for imaging_url in imaging_urls:
+                imaging_resp = _call(
+                    "get_imaging_settings",
+                    imaging_url,
+                    f"<timg:GetImagingSettings><timg:VideoSourceToken>{video_source_tokens[0]}</timg:VideoSourceToken></timg:GetImagingSettings>",
+                )
+                if imaging_resp:
+                    audit.service_urls.setdefault("imaging", imaging_url)
                     break
-            except Exception:
-                continue
-    except Exception:
-        pass
 
-    return info
+    events_urls = _candidate_service_urls(ip, onvif_url, audit.service_urls, "events")
+    for events_url in events_urls:
+        events_resp = _call("get_event_properties", events_url, "<tev:GetEventProperties/>")
+        if events_resp:
+            audit.service_urls.setdefault("events", events_url)
+            break
+
+    _record_support(audit)
+    return audit
+
+
+def query_onvif_device_info(ip: str, onvif_url: str = "",
+                             username: str = "admin", password: str = "") -> OnvifDeviceInfo:
+    """
+    Backward-compatible summary wrapper over the richer ONVIF capability audit.
+    """
+    audit = query_onvif_device_audit(ip, onvif_url, username, password)
+    return OnvifDeviceInfo(
+        manufacturer=audit.manufacturer,
+        model=audit.model,
+        firmware=audit.firmware,
+        serial=audit.serial,
+        hardware_id=audit.hardware_id,
+        stream_uris=list(audit.stream_uris),
+        error=audit.error,
+    )
 
 
 # ─── Dahua / Amcrest UDP Discovery ──────────────────────────────────
