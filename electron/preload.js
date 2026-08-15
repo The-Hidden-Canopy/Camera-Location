@@ -7,6 +7,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 let _backendUrl = '';
 let _backendToken = '';
+let _secretsReady;
 
 async function refreshSecrets() {
   const secrets = await ipcRenderer.invoke('app:getBackendSecrets');
@@ -15,8 +16,9 @@ async function refreshSecrets() {
   return secrets;
 }
 
-// Initial fetch
-refreshSecrets();
+// Initial fetch. Authenticated requests wait for this to finish so the first
+// renderer calls cannot race the backend secret handoff.
+_secretsReady = refreshSecrets();
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // Window controls
@@ -31,9 +33,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Authenticated fetch helper
   getBackendSecrets: refreshSecrets,
-  fetch: (endpoint, options = {}) => {
+  fetch: async (endpoint, options = {}) => {
+    await _secretsReady;
     const url = endpoint.startsWith('http') ? endpoint : `${_backendUrl}${endpoint}`;
-    const headers = options.headers || {};
+    const headers = { ...(options.headers || {}) };
     if (_backendToken) {
       headers['X-Backend-Token'] = _backendToken;
     }

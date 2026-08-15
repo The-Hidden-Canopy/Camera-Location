@@ -49,6 +49,16 @@
     return true;
   };
 
+  async function apiFetch(endpoint, options = {}) {
+    const response = window.electronAPI && window.electronAPI.fetch
+      ? await window.electronAPI.fetch(endpoint, options)
+      : await fetch(endpoint, options);
+    if (!response.ok) {
+      throw new Error(`API request failed (${response.status})`);
+    }
+    return response;
+  }
+
   const app = $('#app');
   const ifaceSelect = $('#iface-select');
   const siteSelect = $('#site-select');
@@ -206,7 +216,7 @@
       const text = document.getElementById('tp-text').value;
       if (!text.trim()) { close(); return; }
       try {
-        const r = await fetch('/api/triage/ingest', {
+        const r = await apiFetch('/api/triage/ingest', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ kind, text }),
@@ -228,7 +238,7 @@
   async function refreshTriage() {
     let s;
     try {
-      const r = await fetch('/api/triage');
+      const r = await apiFetch('/api/triage');
       if (!r.ok) return;
       s = await r.json();
     } catch(_) { return; }
@@ -326,7 +336,7 @@
 
   async function refreshInterfaceProfile() {
     try {
-      const r = await fetch('/api/interface-profile');
+      const r = await apiFetch('/api/interface-profile');
       if (!r.ok) return;
       const p = await r.json();
 
@@ -400,7 +410,7 @@
 
   async function refreshLostDevices() {
     try {
-      const r = await fetch('/api/lost-devices');
+      const r = await apiFetch('/api/lost-devices');
       if (!r.ok) return;
       const data = await r.json();
 
@@ -492,8 +502,9 @@
 
   async function loadInterfaces() {
     try {
-      const resp = await fetch('/api/interfaces');
+      const resp = await apiFetch('/api/interfaces');
       const ifaces = await resp.json();
+      if (!Array.isArray(ifaces)) throw new Error('Invalid interfaces response');
       ifaceSelect.innerHTML = '<option value="">Auto-detect</option>';
       ifaces.forEach(i => {
         const opt = document.createElement('option');
@@ -509,23 +520,27 @@
 
   async function loadExistingDevices() {
     try {
-      const resp = await fetch('/api/devices');
-      liveDevices = await resp.json();
+      const resp = await apiFetch('/api/devices');
+      const data = await resp.json();
+      if (!Array.isArray(data)) throw new Error('Invalid devices response');
+      liveDevices = data;
       syncDisplayedDevices();
     } catch(e) { /* no existing devices */ }
   }
 
   async function loadSites() {
     try {
-      const resp = await fetch('/api/sites');
-      sites = await resp.json();
+      const resp = await apiFetch('/api/sites');
+      const data = await resp.json();
+      if (!Array.isArray(data)) throw new Error('Invalid sites response');
+      sites = data;
       renderSiteOptions();
     } catch(e) { /* ignore */ }
   }
 
   async function loadCurrentSite() {
     try {
-      const resp = await fetch('/api/sites/current');
+      const resp = await apiFetch('/api/sites/current');
       const data = await resp.json();
       currentSiteId = data.site_id || '';
       renderSiteOptions();
@@ -534,7 +549,7 @@
   }
 
   async function setCurrentSite(siteId) {
-    const resp = await fetch('/api/sites/current', {
+    const resp = await apiFetch('/api/sites/current', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ site_id: siteId || null }),
@@ -556,8 +571,10 @@
       return;
     }
     try {
-      const resp = await fetch(`/api/inventory/current?site_id=${encodeURIComponent(currentSiteId)}`);
-      persistedInventory = await resp.json();
+      const resp = await apiFetch(`/api/inventory/current?site_id=${encodeURIComponent(currentSiteId)}`);
+      const data = await resp.json();
+      if (!Array.isArray(data)) throw new Error('Invalid inventory response');
+      persistedInventory = data;
       if (inventoryMode === 'persisted') syncDisplayedDevices();
     } catch(e) { /* ignore */ }
   }
@@ -700,7 +717,7 @@
 
   async function loadCapturePosition() {
     try {
-      const resp = await fetch('/api/capture-position');
+      const resp = await apiFetch('/api/capture-position');
       capturePosition = await resp.json();
       renderCapturePosition();
     } catch(e) { /* ignore */ }
@@ -708,16 +725,25 @@
 
   async function loadSubnetZones() {
     try {
-      const resp = await fetch('/api/subnets');
-      subnetZones = await resp.json();
+      const resp = await apiFetch('/api/subnets');
+      const data = await resp.json();
+      if (!Array.isArray(data)) throw new Error('Invalid subnet response');
+      subnetZones = data;
       renderSubnetZones();
     } catch(e) { /* ignore */ }
   }
 
   // ─── SSE ────────────────────────────────────────────────────────────
-  function connectSSE() {
+  async function connectSSE() {
     if (eventSource) eventSource.close();
-    eventSource = new EventSource('/api/events');
+    let eventsUrl = '/api/events';
+    if (window.electronAPI && window.electronAPI.getBackendSecrets) {
+      const secrets = await window.electronAPI.getBackendSecrets();
+      const url = new URL('/api/events', secrets.url);
+      url.searchParams.set('backend_token', secrets.token || '');
+      eventsUrl = url.toString();
+    }
+    eventSource = new EventSource(eventsUrl);
 
     eventSource.addEventListener('message', (e) => {
       try {
@@ -812,7 +838,7 @@
       }
       if (!confirm('Clear all discovered devices?')) return;
       try {
-        const resp = await fetch('/api/devices/clear', { method: 'POST' });
+        const resp = await apiFetch('/api/devices/clear', { method: 'POST' });
         if (!resp.ok) {
           const err = await resp.json();
           addActivityEvent('error', err.error || 'Clear failed');
@@ -920,12 +946,12 @@
 
   async function toggleWatch() {
     if (isWatching) {
-      await fetch('/api/subnet-watch/stop', { method: 'POST' });
+      await apiFetch('/api/subnet-watch/stop', { method: 'POST' });
       isWatching = false;
       watchBtn.classList.remove('cam__watch-btn--active');
       addActivityEvent('warn', 'Subnet watch stopped');
     } else {
-      await fetch('/api/subnet-watch/start', { method: 'POST' });
+      await apiFetch('/api/subnet-watch/start', { method: 'POST' });
       isWatching = true;
       watchBtn.classList.add('cam__watch-btn--active');
       addActivityEvent('found', 'Subnet watch started — sniffing for new subnets...');
@@ -974,7 +1000,7 @@
     }
 
     try {
-      const resp = await fetch('/api/scan', {
+      const resp = await apiFetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1009,7 +1035,7 @@
 
   async function stopScan() {
     try {
-      await fetch('/api/scan/stop', { method: 'POST' });
+      await apiFetch('/api/scan/stop', { method: 'POST' });
       setScanning(false);
     } catch(e) { /* ignore */ }
   }
@@ -1395,7 +1421,7 @@
     // Fetch the Arm-8 "next safe action" asynchronously and inject it
     // without blocking the panel opening.
     try {
-      const r = await fetch(`/api/devices/${encodeURIComponent(ip)}/next-action`);
+      const r = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/next-action`);
       if (r.ok) {
         const na = await r.json();
         const el = document.getElementById('cam-next-action');
@@ -1784,7 +1810,7 @@
   window._validateDPI = async function(ip) {
     addActivityEvent('found', `Running DPI validation on ${ip}...`);
     try {
-      const resp = await fetch(`/api/dpi/validate/${ip}`);
+      const resp = await apiFetch(`/api/dpi/validate/${ip}`);
       const result = await resp.json();
       // Update device in local state
       const idx = devices.findIndex(d => d.ip === ip);
@@ -1803,7 +1829,7 @@
 
   window._setCapturePosition = async function(position) {
     try {
-      const resp = await fetch('/api/capture-position', {
+      const resp = await apiFetch('/api/capture-position', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ position }),
@@ -1824,7 +1850,7 @@
     if (!subnet) return;
 
     try {
-      await fetch('/api/subnets', {
+      await apiFetch('/api/subnets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subnet, label, gateway, method, notes }),
@@ -1839,7 +1865,7 @@
 
   window._removeSubnet = async function(subnet) {
     try {
-      await fetch(`/api/subnets/${encodeURIComponent(subnet)}`, { method: 'DELETE' });
+      await apiFetch(`/api/subnets/${encodeURIComponent(subnet)}`, { method: 'DELETE' });
       await loadSubnetZones();
       addActivityEvent('warn', `Removed subnet zone: ${subnet}`);
     } catch(e) { /* ignore */ }
@@ -1852,7 +1878,7 @@
     // Load saved credentials
     let savedUser = 'admin', savedPass = '';
     try {
-      const credsResp = await fetch(`/api/devices/${encodeURIComponent(ip)}/credentials`);
+      const credsResp = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/credentials`);
       if (credsResp.ok) {
         const creds = await credsResp.json();
         savedUser = creds.username || 'admin';
@@ -1914,7 +1940,7 @@
     const user = (document.getElementById('viewer-user') || {}).value || 'admin';
     const pass = (document.getElementById('viewer-pass') || {}).value || '';
     try {
-      await fetch(`/api/devices/${encodeURIComponent(ip)}/credentials`, {
+      await apiFetch(`/api/devices/${encodeURIComponent(ip)}/credentials`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: user, password: pass })
@@ -1967,7 +1993,7 @@
     const user = (document.getElementById('viewer-user') || {}).value || 'admin';
     const pass = (document.getElementById('viewer-pass') || {}).value || '';
     try {
-      const resp = await fetch(`/api/devices/${encodeURIComponent(ip)}/onvif-info?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`);
+      const resp = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/onvif-info?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`);
       const info = await resp.json();
       if (info.error) {
         addActivityEvent('error', `ONVIF info failed for ${ip}: ${info.error}`);
@@ -2077,7 +2103,7 @@
     resultEl.style.display = 'none';
 
     try {
-      const resp = await fetch(`/api/devices/${encodeURIComponent(ip)}/set-ip`, {
+      const resp = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/set-ip`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ new_ip: newIp, netmask, gateway, username, password }),
