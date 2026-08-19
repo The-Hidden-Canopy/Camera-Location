@@ -10,7 +10,7 @@ import functools
 import os
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -112,4 +112,4 @@ def new_uuid() -> str:
 
 
 def utcnow_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="milliseconds")
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")

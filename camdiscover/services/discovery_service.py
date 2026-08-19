@@ -8,6 +8,7 @@ impact scan timing, but if it becomes a concern we can move writes to a queue.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, List, Optional
 
 from ..models import DiscoveredDevice
@@ -91,12 +92,29 @@ class DiscoveryService:
         for endpoint in self._endpoints.list_current(resolved_site):
             asset = self._assets.get(endpoint.asset_id) if endpoint.asset_id else None
             observations = self._observations.list_for_endpoint(endpoint.endpoint_id, limit=25)
+            freshness = self._freshness(endpoint.last_seen)
             rows.append({
                 "endpoint": endpoint.to_dict(),
                 "asset": asset.to_dict() if asset else None,
                 "observations": [obs.to_dict() for obs in observations],
+                "freshness": freshness,
             })
         return rows
+
+    @staticmethod
+    def _freshness(last_seen: Optional[datetime]) -> dict[str, Any]:
+        """Expose persisted age without presenting it as a live observation."""
+        if not last_seen:
+            return {"state": "unknown", "as_of": None, "age_seconds": None}
+        observed = last_seen
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        age = max(0, int((datetime.now(timezone.utc) - observed).total_seconds()))
+        return {
+            "state": "stale" if age > 86400 else "observed",
+            "as_of": last_seen.isoformat(),
+            "age_seconds": age,
+        }
 
 
 def attach_persistence(

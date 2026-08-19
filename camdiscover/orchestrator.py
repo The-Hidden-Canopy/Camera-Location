@@ -43,6 +43,10 @@ from .network import (
 from .vendor import lookup_vendor, fingerprint_device, classify_device_type
 
 
+def _utcnow() -> _dt.datetime:
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
 @dataclass
 class DiscoveryProgress:
     phase: str
@@ -460,7 +464,7 @@ class DiscoveryOrchestrator:
         with self._triage_lock:
             if ip in self._gateway_mismatch_q:
                 gm = self._gateway_mismatch_q[ip]
-                gm.last_seen = _dt.datetime.now()
+                gm.last_seen = _utcnow()
                 if observed_gateway and not gm.observed_target_gateway:
                     gm.observed_target_gateway = observed_gateway
                 return
@@ -489,7 +493,7 @@ class DiscoveryOrchestrator:
                 self._multicast_groups[group] = MulticastGroup(
                     group=group, protocol_hint=protocol_hint)
             mg = self._multicast_groups[group]
-            mg.last_seen = _dt.datetime.now()
+            mg.last_seen = _utcnow()
             mg.packet_count += 1
             if source_ip and source_ip not in mg.sources:
                 mg.sources.append(source_ip)
@@ -592,7 +596,7 @@ class DiscoveryOrchestrator:
             return False
 
         entry.status = "validating"
-        entry.last_checked = _dt.datetime.now()
+        entry.last_checked = _utcnow()
         ip = entry.ip
         dev = self.devices.get(ip)
         self._set_task(f"P5 camera validation — {ip}", "triage")
@@ -921,7 +925,7 @@ class DiscoveryOrchestrator:
                     f"P1 SKIP {cursor.cidr}: too large for auto-scan "
                     f"(/{net.prefixlen} > /{self._max_subnet_prefix})", "triage")
                 cursor.completed = True
-                cursor.completed_at = _dt.datetime.now()
+                cursor.completed_at = _utcnow()
                 return True
         except Exception:
             pass
@@ -932,7 +936,7 @@ class DiscoveryOrchestrator:
                 f"P1 PAUSE {cursor.cidr}: probe budget exhausted "
                 f"({self._probes_consumed}/{self._probe_budget})", "triage")
             cursor.completed = True
-            cursor.completed_at = _dt.datetime.now()
+            cursor.completed_at = _utcnow()
             return True
 
         # ── Rate-limiting pause between hosts ─────────────────────────────
@@ -954,7 +958,7 @@ class DiscoveryOrchestrator:
             host_idx = cursor.next_host - 1
             if host_idx < 0 or host_idx >= len(hosts):
                 cursor.completed = True
-                cursor.completed_at = _dt.datetime.now()
+                cursor.completed_at = _utcnow()
                 temp = self._scope_temp_ip.pop(cursor.cidr, None)
                 if temp and self.selected_interface:
                     try:
@@ -966,7 +970,7 @@ class DiscoveryOrchestrator:
             cursor.next_host = host_idx + 2
             if cursor.next_host > len(hosts):
                 cursor.completed = True
-                cursor.completed_at = _dt.datetime.now()
+                cursor.completed_at = _utcnow()
                 temp = self._scope_temp_ip.pop(cursor.cidr, None)
                 if temp and self.selected_interface:
                     try:
@@ -976,7 +980,7 @@ class DiscoveryOrchestrator:
         else:
             base = ".".join(cursor.cidr.split(".")[:3])
             if cursor.started_at is None:
-                cursor.started_at = _dt.datetime.now()
+                cursor.started_at = _utcnow()
                 iface_name = (self.selected_interface.name
                               if self.selected_interface else "")
                 if (iface_name and cursor.cidr not in self._scope_temp_ip
@@ -996,7 +1000,7 @@ class DiscoveryOrchestrator:
             cursor.next_host = host + 1
             if cursor.next_host > 254:
                 cursor.completed = True
-                cursor.completed_at = _dt.datetime.now()
+                cursor.completed_at = _utcnow()
                 temp = self._scope_temp_ip.pop(cursor.cidr, None)
                 if temp and self.selected_interface:
                     try:
@@ -1019,7 +1023,7 @@ class DiscoveryOrchestrator:
                 if not dev.open_ports:
                     self._scan_and_fingerprint(ip)
                 else:
-                    dev.last_seen = _dt.datetime.now()
+                    dev.last_seen = _utcnow()
                     self._emit_device_updated(dev)
                 # After basic fingerprint, promote to P5 for deep validation
                 # if the device looks camera-capable.  Infrastructure classes
@@ -1057,7 +1061,7 @@ class DiscoveryOrchestrator:
             time.sleep(self._probe_delay)
 
         entry.attempts += 1
-        entry.last_checked = _dt.datetime.now()
+        entry.last_checked = _utcnow()
         self._set_task(
             f"P2 mismatch {entry.ip} — {entry.reason} (try {entry.attempts})",
             "triage")
@@ -1096,7 +1100,7 @@ class DiscoveryOrchestrator:
                 gm = self._gateway_mismatch_q.get(entry.ip)
                 if gm and gm.status == "observed":
                     gm.status = "confirmed"
-                    gm.last_checked = _dt.datetime.now()
+                    gm.last_checked = _utcnow()
 
             # Queue for P5 deep validation — mismatch devices are often cameras
             # with old static configs and are high-value targets.
@@ -1224,7 +1228,7 @@ class DiscoveryOrchestrator:
         if self._probe_delay > 0:
             time.sleep(self._probe_delay)
 
-        orph.last_checked = _dt.datetime.now()
+        orph.last_checked = _utcnow()
         self._set_task(f"P4 orphan {orph.ip or orph.mac} — {orph.reason}", "triage")
         try:
             if ping_host(orph.ip, 800) or test_tcp_port(orph.ip, 80, 1.0):
@@ -1251,7 +1255,7 @@ class DiscoveryOrchestrator:
             if not c:
                 c = CandidateSubnet(cidr=cidr, source=source, confidence=confidence)
                 self._candidate_q[cidr] = c
-            c.last_seen = _dt.datetime.now()
+            c.last_seen = _utcnow()
             c.confidence = max(c.confidence, confidence)
             if observed_ip and observed_ip not in c.observed_ips:
                 c.observed_ips.append(observed_ip)
@@ -1267,7 +1271,7 @@ class DiscoveryOrchestrator:
                                   suspected_gateway=gateway,
                                   suspected_cidr=cidr, priority=priority)
                 self._mismatch_q[ip] = m
-            m.last_seen = _dt.datetime.now()
+            m.last_seen = _utcnow()
             if mac and not m.mac:
                 m.mac = mac
             if gateway and not m.suspected_gateway:
@@ -1284,7 +1288,7 @@ class DiscoveryOrchestrator:
             if not o:
                 o = OrphanEntry(ip=ip, mac=mac, reason=reason, status=status)
                 self._orphan_q[key] = o
-            o.last_seen = _dt.datetime.now()
+            o.last_seen = _utcnow()
 
     def _triage_ingest(self, ip: str, kind: str, detail: str, raw: str):
         """Classify a passive signal into the right queue. Evidence only —
@@ -1476,7 +1480,7 @@ class DiscoveryOrchestrator:
                                   f"DNS name observed: {hostname}",
                                   "external_dns", raw=(line or "")[:200])
         self._refresh_device_type(device)
-        device.last_seen = _dt.datetime.now()
+        device.last_seen = _utcnow()
 
     def ingest_external_evidence(self, kind: str, text: str) -> dict:
         """Parse pasted/uploaded out-of-band data and feed the triage queues.
@@ -1666,7 +1670,7 @@ class DiscoveryOrchestrator:
                         self._multicast_groups[group_ip] = MulticastGroup(
                             group=group_ip, protocol_hint="igmp_join")
                     mg = self._multicast_groups[group_ip]
-                    mg.last_seen = _dt.datetime.now()
+                    mg.last_seen = _utcnow()
                     mg.packet_count += 1
                     if ip not in mg.listeners:
                         mg.listeners.append(ip)
@@ -1689,7 +1693,7 @@ class DiscoveryOrchestrator:
                         self._multicast_groups[group_ip] = MulticastGroup(
                             group=group_ip, protocol_hint="rtp_stream")
                     mg = self._multicast_groups[group_ip]
-                    mg.last_seen = _dt.datetime.now()
+                    mg.last_seen = _utcnow()
                     mg.packet_count += 1
                     if ip not in mg.sources:
                         mg.sources.append(ip)
@@ -1854,7 +1858,7 @@ class DiscoveryOrchestrator:
                         # full port-scan on this IP, don't repeat the work — just
                         # refresh the timestamp and move on.
                         if device.open_ports:
-                            device.last_seen = _dt.datetime.now()
+                            device.last_seen = _utcnow()
                             self._update_subnet_mismatch(device)
                             self._emit_device_updated(device)
                         else:
@@ -1915,25 +1919,12 @@ class DiscoveryOrchestrator:
                 self._emit_device_updated(dev)
                 continue
 
-            # Only create a new device entry from the ARP table if:
-            #   (a) we already know about this IP from another source, OR
-            #   (b) the MAC OUI belongs to a known camera/NVR vendor, OR
-            #   (c) the device is on a foreign subnet (subnet mismatch → triage)
-            # This prevents the device list from being flooded with every
-            # laptop, phone, and router that appears in the ARP cache.
+            # ARP is direct Layer-2 evidence that a host is present.  Keep
+            # every unicast host so computers and infrastructure are visible;
+            # later fingerprinting must provide the evidence for a stronger
+            # type.  A curated camera-only gate made Ubiquiti and ordinary
+            # computers disappear before classification could run.
             vendor_from_mac = lookup_vendor(mac) if mac else "Unknown"
-            is_camera_oui = any(
-                kw in vendor_from_mac.lower() for kw in CAMERA_VENDOR_KEYWORDS
-            )
-            already_known = ip in self.devices
-            iface_subnet  = (ip_to_subnet(self.selected_interface.ip)
-                             if self.selected_interface and self.selected_interface.ip
-                             else "")
-            ip_subnet = ip_to_subnet(ip)
-            is_foreign = bool(iface_subnet) and ip_subnet != iface_subnet
-
-            if not (already_known or is_camera_oui or is_foreign):
-                continue   # plain workstation/router ARP entry — skip
 
             device = self._get_or_create(ip, "ARP")
             if not device.mac and mac:
@@ -1943,7 +1934,7 @@ class DiscoveryOrchestrator:
             self._maybe_add_mac_vendor_evidence(device)
             if "ARP" not in device.discovery_methods:
                 device.discovery_methods.append("ARP")
-            device.last_seen = _dt.datetime.now()
+            device.last_seen = _utcnow()
             self._update_subnet_mismatch(device)
             self._refresh_dpi_stages(device)
             self._emit_device_updated(device)
@@ -1984,7 +1975,7 @@ class DiscoveryOrchestrator:
                 self._record_evidence(device, "onvif_device_service_url",
                                       f"ONVIF device_service: {od.xaddrs[0]}",
                                       "active_onvif", raw=od.xaddrs[0])
-            device.last_seen = _dt.datetime.now()
+            device.last_seen = _utcnow()
             self._update_subnet_mismatch(device)
             self._refresh_dpi_stages(device)
             self._emit_device_updated(device)
@@ -2012,7 +2003,7 @@ class DiscoveryOrchestrator:
                 self._record_evidence(device, "ssdp_camera_service",
                                       f"SSDP camera service from {sd.ip}",
                                       "active_ssdp", raw=combined)
-            device.last_seen = _dt.datetime.now()
+            device.last_seen = _utcnow()
             self._update_subnet_mismatch(device)
             self._refresh_dpi_stages(device)
             self._emit_device_updated(device)
@@ -2037,7 +2028,7 @@ class DiscoveryOrchestrator:
                                   "Dahua/Amcrest UDP discovery response",
                                   "active_dahua", raw=str(dd))
             self._maybe_add_mac_vendor_evidence(device)
-            device.last_seen = _dt.datetime.now()
+            device.last_seen = _utcnow()
             self._update_subnet_mismatch(device)
             self._refresh_dpi_stages(device)
             self._emit_device_updated(device)
@@ -2068,7 +2059,7 @@ class DiscoveryOrchestrator:
             self._record_evidence(device, "mdns_camera_service",
                                   f"mDNS camera service: {svc}",
                                   "active_mdns", raw=f"svc={svc} name={md.name}")
-            device.last_seen = _dt.datetime.now()
+            device.last_seen = _utcnow()
             self._refresh_dpi_stages(device)
             self._emit_device_updated(device)
 
@@ -2076,7 +2067,7 @@ class DiscoveryOrchestrator:
         device = self._get_or_create(ip, method)
         if method not in device.discovery_methods:
             device.discovery_methods.append(method)
-        device.last_seen = _dt.datetime.now()
+        device.last_seen = _utcnow()
         device.raw_responses[method.lower()] = data
         self._emit_device_updated(device)
 
@@ -2221,7 +2212,7 @@ class DiscoveryOrchestrator:
 
         # Subnet
         device.subnet = ip_to_subnet(ip)
-        device.last_seen = _dt.datetime.now()
+        device.last_seen = _utcnow()
         self._update_subnet_mismatch(device)
         self._refresh_dpi_stages(device)
 
@@ -2316,7 +2307,7 @@ class DiscoveryOrchestrator:
     def _validate_dpi_stages(self, ip: str):
         """Run all DPI protocol-stage checks for a device."""
         device = self._get_or_create(ip)
-        now = _dt.datetime.now
+        now = _utcnow
 
         # Stage 1: Link (L2 reachability)
         reachable = ping_host(ip, 1500)
@@ -2515,7 +2506,7 @@ class DiscoveryOrchestrator:
 
         self._update_subnet_mismatch(device)
         self._refresh_dpi_stages(device)
-        device.last_seen = _dt.datetime.now()
+        device.last_seen = _utcnow()
         self._emit_device_updated(device)
 
     # ── Camera-vs-infrastructure discrimination ────────────────────────────
@@ -2547,7 +2538,7 @@ class DiscoveryOrchestrator:
             return False
         if device.open_ports and self._CAMERA_PORTS.intersection(device.open_ports):
             return False
-        if device.device_class in ("nvr", "bridge", "router", "switch", "server",
+        if device.device_class in ("nvr", "bridge", "router", "switch", "server", "computer",
                                    "gateway", "infrastructure", "seed", "seed_nvr"):
             return False
         if device.subnet_mismatch:
@@ -2624,7 +2615,7 @@ class DiscoveryOrchestrator:
         else:
             existing = {}
 
-        now = _dt.datetime.now()
+        now = _utcnow()
         evidence_kinds = {e.kind for e in device.evidence}
         discovery_ok = bool({
             "onvif_probe_match_nvt", "onvif_probe_match_generic", "onvif_device_service_url",

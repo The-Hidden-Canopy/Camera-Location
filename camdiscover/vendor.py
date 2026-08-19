@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import List
 
 from .asset_taxonomy import (
@@ -18,11 +19,11 @@ OUI_DB: dict[str, str] = {
     # Amcrest / Dahua
     "3c:ef:8c": "Dahua/Amcrest",
     "40:2c:76": "Dahua/Amcrest",
-    "4c:11:bf": "Dahua/Amcrest",  # also used by Uniview OEM
+    "4c:11:bf": "Dahua/Amcrest/Uniview OEM",
     "48:34:29": "Dahua/Amcrest",
-    "a0:bd:1d": "Dahua/Amcrest",  # also used by Uniview OEM
-    "e0:50:8b": "Dahua/Amcrest",  # also used by Hanwha OEM
-    "f8:4d:fc": "Dahua/Amcrest",  # also used by Uniview OEM
+    "a0:bd:1d": "Dahua/Amcrest/Uniview OEM",
+    "e0:50:8b": "Dahua/Amcrest/Hanwha OEM",
+    "f8:4d:fc": "Dahua/Amcrest/Uniview OEM",
     "90:02:a9": "Dahua/Amcrest",
     "38:af:29": "Dahua/Amcrest",
     "20:17:42": "Dahua/Amcrest",
@@ -41,12 +42,12 @@ OUI_DB: dict[str, str] = {
     "54:e4:bd": "Hikvision",
     "60:5b:c4": "Hikvision",
     "6c:b9:5b": "Hikvision",
-    "7c:49:eb": "Hikvision",  # also used by some Reolink OEM boards
+    "7c:49:eb": "Hikvision/Reolink OEM",
     "a4:14:37": "Hikvision",
     "c0:56:e3": "Hikvision",  # also used by some Dahua OEM boards
     "ec:17:2f": "Hikvision",
-    "b0:c5:ca": "Hikvision",  # also used by Dahua/Amcrest and Reolink OEM
-    "d4:43:a8": "Hikvision",  # also used by Dahua/Amcrest and Hanwha OEM
+    "b0:c5:ca": "Hikvision/Reolink OEM",
+    "d4:43:a8": "Hikvision/Hanwha OEM",
     "fc:9f:fd": "Hikvision",
     "3c:1b:f8": "Hikvision",
     "54:8c:81": "Hikvision",
@@ -64,21 +65,18 @@ OUI_DB: dict[str, str] = {
 
     # Hanwha / Wisenet
     "00:09:18": "Hanwha/Wisenet",
-    "e0:50:8b": "Hanwha/Wisenet",
-    "d4:43:a8": "Hanwha/Wisenet",
+    # Shared OEM prefixes stay explicitly ambiguous instead of being
+    # overwritten by the last dictionary entry.
 
     # Bosch
     "00:0a:7a": "Bosch",
     "00:40:93": "Bosch",
 
     # Uniview
-    "4c:11:bf": "Uniview",
-    "a0:bd:1d": "Uniview",
-    "f8:4d:fc": "Uniview",
+    # Shared prefixes are listed above with their uncertainty preserved.
 
     # Reolink
-    "b0:c5:ca": "Reolink",
-    "7c:49:eb": "Reolink",
+    # Shared prefixes are listed above with their uncertainty preserved.
 
     # Vivotek
     "00:02:d1": "Vivotek",
@@ -108,10 +106,22 @@ OUI_DB: dict[str, str] = {
 
 def lookup_vendor(mac: str) -> str:
     """Look up vendor from MAC address using OUI prefix."""
-    if not mac or mac in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+    if not mac:
         return "Unknown"
-    normalized = mac.lower().replace("-", ":").replace(".", ":")
-    oui = ":".join(normalized.split(":")[:3])
+
+    # Accept colon, hyphen, dotted Cisco, and compact MAC notation.  Parsing
+    # the first six hexadecimal characters avoids the old dotted-format bug
+    # where ``245a.4caa.bbcc`` was treated as one OUI token.
+    raw = str(mac).strip().lower()
+    if not re.fullmatch(r"[0-9a-f:.-]+", raw):
+        return "Unknown"
+    compact = re.sub(r"[^0-9a-f]", "", raw)
+    if len(compact) < 6 or len(compact) > 12 or not re.fullmatch(r"[0-9a-f]+", compact):
+        return "Unknown"
+    if compact[:12] in ("000000000000", "ffffffffffff"):
+        return "Unknown"
+    oui_bytes = compact[:6]
+    oui = ":".join(oui_bytes[index:index + 2] for index in range(0, 6, 2))
     return OUI_DB.get(oui, "Unknown")
 
 
@@ -331,7 +341,7 @@ def classify_device_type(
     joined = " ".join(part for part in (vendor_l, banner_l, model_l, host_l, proto_l) if part)
 
     printer_ports = {631, 9100}
-    endpoint_ports = {445, 3389}
+    endpoint_ports = {135, 139, 445, 3389}
     infra_ports = {22, 23, 53}
     identity_evidence: List[str] = []
     if vendor and vendor != "Unknown":
@@ -509,13 +519,31 @@ def classify_device_type(
             ],
         )
 
-    if port_set.intersection(endpoint_ports) and any(
-        token in joined for token in ("desktop", "laptop", "windows", "workstation")
+    if port_set.intersection({22, 161, 162, 179, 443}) and any(
+        token in joined for token in ("server", "nas", "synology", "qnap")
     ):
         return _device_type_result(
             "server",
-            65,
-            rationale=_rationale(2, "endpoint ports + keyword"),
+            70,
+            warn_reset=True,
+            rationale=_rationale(3, "server/NAS ports + keyword"),
+            vendor=vendor,
+            model=model,
+            hostname=hostname,
+            asset_class="server_nas",
+            reset_risk="high",
+            evidence=identity_evidence + [
+                "server or NAS management ports with platform keywords",
+            ],
+        )
+
+    if port_set.intersection(endpoint_ports):
+        endpoint_keywords = ("desktop", "laptop", "windows", "workstation", "computer", "macbook", "imac")
+        keyword_match = any(token in joined for token in endpoint_keywords)
+        return _device_type_result(
+            "computer",
+            72 if keyword_match else 55,
+            rationale=_rationale(2, "endpoint service ports" + (" + computer identity" if keyword_match else "; OS identity unconfirmed")),
             vendor=vendor,
             model=model,
             hostname=hostname,
@@ -523,7 +551,8 @@ def classify_device_type(
             operational_role="installer_laptop" if "laptop" in joined else "workstation",
             reset_risk="low",
             evidence=identity_evidence + [
-                "endpoint ports combined with workstation keywords",
+                "endpoint service ports indicate a computer or SMB host",
+                *(["computer identity keyword present"] if keyword_match else ["computer identity not confirmed"]),
             ],
         )
 
@@ -571,24 +600,6 @@ def classify_device_type(
             reset_risk="critical",
             evidence=identity_evidence + [
                 "NVR or DVR keyword present",
-            ],
-        )
-
-    if port_set.intersection({22, 161, 162, 179, 443}) and any(
-        token in joined for token in ("server", "nas", "synology", "qnap")
-    ):
-        return _device_type_result(
-            "server",
-            70,
-            warn_reset=True,
-            rationale=_rationale(3, "server/NAS ports + keyword"),
-            vendor=vendor,
-            model=model,
-            hostname=hostname,
-            asset_class="server_nas",
-            reset_risk="high",
-            evidence=identity_evidence + [
-                "server or NAS management ports with platform keywords",
             ],
         )
 

@@ -17,12 +17,26 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ..domain.models import ChangeJob, Observation
+from ..domain.events import DomainEvent, append_domain_event
+from ..domain.transitions import execute_transition
 from ..persistence.db import Database, new_uuid
 from ..persistence.repos import AssetRepo, ChangeJobRepo, EndpointRepo, NetworkProfileRepo, ObservationRepo
 from ..services.reconciliation import _normalise_mac
 
 
 class ChangePlanService:
+    _JOB_TRANSITIONS = {
+        "new": {"draft", "proposed"},
+        "draft": set(),
+        "proposed": {"approved"},
+        "approved": {"executing"},
+        "executing": {"verifying", "failure"},
+        "verifying": {"success", "manual_recovery"},
+        "failure": set(),
+        "manual_recovery": set(),
+        "success": set(),
+    }
+
     def __init__(self, db: Database):
         self._db = db
         self._assets = AssetRepo(db)
@@ -94,7 +108,13 @@ class ChangePlanService:
             prior=prior,
             status="proposed" if not issues else "draft",
         )
-        self._jobs.save(job)
+        self._transition_status(
+            job,
+            job.status,
+            current_state="new",
+            actor=user_id or "operator",
+            justification=f"Proposed governed IP change for endpoint {endpoint_id}",
+        )
 
         # Record validation observation even if not yet approved.
         self._obs.save(Observation(
@@ -120,10 +140,14 @@ class ChangePlanService:
         if confirmation_phrase != expected:
             raise ValueError("confirmation phrase does not match")
 
-        job.status = "approved"
         job.approved_at = datetime.now(timezone.utc)
         job.approval_phrase = confirmation_phrase
-        self._jobs.save(job)
+        self._transition_status(
+            job,
+            "approved",
+            actor="operator",
+            justification=confirmation_phrase,
+        )
         return job
 
     def execute(
@@ -148,9 +172,13 @@ class ChangePlanService:
         if not endpoint or not asset:
             raise ValueError("asset or endpoint missing")
 
-        job.status = "executing"
         job.executed_at = datetime.now(timezone.utc)
-        self._jobs.save(job)
+        self._transition_status(
+            job,
+            "executing",
+            actor="operator",
+            justification=f"Execute approved change plan {job.job_id}",
+        )
 
         # Capture rollback state determined before change.
         job.rollback_state = dict(job.prior)
@@ -164,17 +192,18 @@ class ChangePlanService:
                 result = {"success": False, "detail": str(e), "rollback_state": {}}
 
         job.result = result.get("detail", "")
-        if result.get("success"):
-            job.status = "verifying"
-        else:
-            job.status = "failure"
-        self._jobs.save(job)
+        next_status = "verifying" if result.get("success") else "failure"
+        self._transition_status(
+            job,
+            next_status,
+            actor="change-plan-executor",
+            justification=f"Executor result for change plan {job.job_id}: {job.result or 'no detail'}",
+        )
 
         if job.status == "verifying":
             time.sleep(2)  # Give the device a moment to reapply config/reboot.
             verified = self._verify(asset, job)
             if verified:
-                job.status = "success"
                 job.verified_at = datetime.now(timezone.utc)
                 # Update endpoint to reflect new IP.
                 endpoint.ip_history = list(endpoint.ip_history or []) + [endpoint.ip]
@@ -184,9 +213,26 @@ class ChangePlanService:
                     endpoint.network_profile_id = job.proposed["profile_id"]
                 endpoint.last_seen = datetime.now(timezone.utc)
                 self._endpoints.save(endpoint)
+                append_domain_event(
+                    self._db,
+                    DomainEvent(
+                        site_id=job.site_id,
+                        aggregate_type="device_endpoint",
+                        aggregate_id=endpoint.endpoint_id,
+                        event_type="device_endpoint.ip_changed",
+                        actor="change-plan-executor",
+                        justification=f"Verified change plan {job.job_id}",
+                        payload={"new_ip": endpoint.ip, "job_id": job.job_id},
+                    ),
+                )
             else:
-                job.status = "manual_recovery"
-        self._jobs.save(job)
+                pass
+            self._transition_status(
+                job,
+                "success" if verified else "manual_recovery",
+                actor="change-plan-executor",
+                justification=f"Verification result for change plan {job.job_id}",
+            )
 
         self._obs.save(Observation(
             observation_id=new_uuid(),
@@ -199,6 +245,35 @@ class ChangePlanService:
             weight=0,
         ))
 
+        return job
+
+    def _transition_status(
+        self,
+        job: ChangeJob,
+        target_state: str,
+        *,
+        actor: str,
+        justification: str,
+        current_state: Optional[str] = None,
+    ) -> ChangeJob:
+        source_state = current_state if current_state is not None else self._jobs.get(job.job_id).status
+
+        def mutate():
+            job.status = target_state
+            return self._jobs.save(job)
+
+        execute_transition(
+            self._db,
+            aggregate_type="change_job",
+            aggregate_id=job.job_id,
+            site_id=job.site_id,
+            current_state=source_state,
+            target_state=target_state,
+            allowed_transitions=self._JOB_TRANSITIONS,
+            mutate=mutate,
+            actor=actor,
+            justification=justification,
+        )
         return job
 
     def _get_job_for_site(self, job_id: str, site_id: str) -> ChangeJob:

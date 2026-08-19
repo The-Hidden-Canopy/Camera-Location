@@ -52,11 +52,20 @@ function getPythonCandidates() {
         path.join(root, 'python', 'bin', 'python'),
       ];
 
+  const developmentCandidates = !app.isPackaged
+    ? (process.platform === 'win32'
+      ? [path.join(root, '.bundled-runtime', 'python', 'python.exe')]
+      : [
+          path.join(root, '.bundled-runtime', 'python', 'bin', 'python3'),
+          path.join(root, '.bundled-runtime', 'python', 'bin', 'python'),
+        ])
+    : [];
+
   const pathCandidates = process.platform === 'win32'
     ? ['python.exe', 'python', 'py.exe']
     : ['python3', 'python'];
 
-  return [...envCandidates, ...bundledCandidates, ...pathCandidates];
+  return [...envCandidates, ...developmentCandidates, ...bundledCandidates, ...pathCandidates];
 }
 
 function canExecute(command) {
@@ -436,7 +445,7 @@ app.whenReady().then(async () => {
     await startFlask();
   } catch (err) {
     dialog.showErrorBox('Backend Failed',
-      `Could not start Python/Flask.\n\n${err.message}\n\nMake sure Python is installed:\n  pip install -e .`);
+      `Could not start Python/Flask.\n\n${err.message}\n\nRun Launch.bat to install the dependencies from requirements.txt.`);
     app.quit();
     return;
   }

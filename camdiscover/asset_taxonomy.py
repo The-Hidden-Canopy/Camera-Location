@@ -34,6 +34,8 @@ def infer_asset_class(
         if any(token in joined for token in ("desktop", "laptop", "workstation", "windows 10", "windows 11")):
             return "workstation"
         return "server_nas"
+    if device_class == "computer":
+        return "workstation"
     if device_class == "printer":
         return "printer"
     if any(token in joined for token in ("petrocloud", "twenty20")):

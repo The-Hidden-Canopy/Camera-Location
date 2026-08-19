@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from .asset_taxonomy import infer_asset_class, infer_criticality, infer_operational_role
@@ -29,7 +29,7 @@ class Evidence:
     detail: str      # human-readable description of what was observed
     source: str      # "passive_wsdiscovery" | "active_onvif" | "arp" | "active_rtsp" …
     weight: int      # contribution to camera_confidence (can be negative)
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     raw: str = ""    # raw snippet (first 500 chars of packet / response)
 
     # ── Provenance ──────────────────────────────────────────────────────
@@ -91,7 +91,7 @@ class DPIStageResult:
     stage: str
     status: str   # pass | fail | unchecked | na
     detail: str = ""
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict:
         return {
@@ -184,8 +184,8 @@ class MismatchEntry:
     status: str = "observed"
     priority: int = 50                  # lower = more urgent
     attempts: int = 0
-    first_seen: datetime = field(default_factory=datetime.now)
-    last_seen: datetime = field(default_factory=datetime.now)
+    first_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_checked: Optional[datetime] = None
 
     def to_dict(self) -> dict:
@@ -213,8 +213,8 @@ class CandidateSubnet:
     suspected_gateway: str = ""
     attempts: int = 0
     promoted: bool = False
-    first_seen: datetime = field(default_factory=datetime.now)
-    last_seen: datetime = field(default_factory=datetime.now)
+    first_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict:
         return {
@@ -240,8 +240,8 @@ class OrphanEntry:
     status: str = "passive_seen"
     reason: str = ""
     camera_confidence: int = 0
-    first_seen: datetime = field(default_factory=datetime.now)
-    last_seen: datetime = field(default_factory=datetime.now)
+    first_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_checked: Optional[datetime] = None
 
     def to_dict(self) -> dict:
@@ -273,7 +273,7 @@ class CameraValidationEntry:
     http_ok:    bool = False
     nvr_match:  bool = False
     stream_ok:  bool = False
-    first_queued: datetime = field(default_factory=datetime.now)
+    first_queued: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_checked: Optional[datetime] = None
 
     def to_dict(self) -> dict:
@@ -324,8 +324,8 @@ class MulticastGroup:
     listeners: List[str] = field(default_factory=list) # recipient IPs (IGMP)
     related_ips: List[str] = field(default_factory=list)
     protocol_hint: str = ""             # e.g. "camera_stream" | "ssdp" | "mdns"
-    first_seen: datetime = field(default_factory=datetime.now)
-    last_seen: datetime = field(default_factory=datetime.now)
+    first_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     packet_count: int = 0
 
     def to_dict(self) -> dict:
@@ -365,8 +365,8 @@ class GatewayMismatch:
     status: str = "observed"    # observed | checking | confirmed | resolved
     priority: int = 30
     attempts: int = 0
-    first_seen: datetime = field(default_factory=datetime.now)
-    last_seen: datetime = field(default_factory=datetime.now)
+    first_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_checked: Optional[datetime] = None
 
     def to_dict(self) -> dict:
@@ -443,8 +443,8 @@ class DiscoveredDevice:
     subnet:     str = ""
     confidence: int = 0                  # legacy fingerprint score (keep for compat)
     discovery_methods: List[str] = field(default_factory=list)
-    first_seen: datetime = field(default_factory=datetime.now)
-    last_seen: datetime = field(default_factory=datetime.now)
+    first_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     raw_responses: Dict[str, str] = field(default_factory=dict)
 
     # ── Append-only evidence ledger ─────────────────────────────────────

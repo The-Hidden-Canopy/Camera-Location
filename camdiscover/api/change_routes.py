@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from ..persistence.db import get_database
 from ..services.change_plan import ChangePlanService
 
 change_api = Blueprint("change_api", __name__, url_prefix="/api/change-plans")
+
+
+def _db():
+    """Use the database selected by create_app, including test databases."""
+    return current_app.config.get("CAMDISCOVER_DB") or get_database()
 
 
 def _status_for_error(message: str) -> int:
@@ -18,7 +23,7 @@ def _status_for_error(message: str) -> int:
 def propose_change():
     body = request.json or {}
     try:
-        job = ChangePlanService(get_database()).propose(
+        job = ChangePlanService(_db()).propose(
             site_id=body.get("site_id"),
             endpoint_id=body.get("endpoint_id"),
             new_ip=body.get("new_ip"),
@@ -39,7 +44,7 @@ def approve_change(job_id: str):
     if not site_id:
         return jsonify({"error": "site_id is required"}), 400
     try:
-        job = ChangePlanService(get_database()).approve(
+        job = ChangePlanService(_db()).approve(
             job_id,
             site_id,
             body.get("confirmation_phrase", ""),
@@ -55,7 +60,7 @@ def execute_change(job_id: str):
     site_id = body.get("site_id")
     if not site_id:
         return jsonify({"error": "site_id is required"}), 400
-    svc = ChangePlanService(get_database())
+    svc = ChangePlanService(_db())
     try:
         job = svc.execute(job_id, site_id)
     except ValueError as e:
@@ -69,7 +74,7 @@ def get_change(job_id: str):
     if not site_id:
         return jsonify({"error": "site_id is required"}), 400
     try:
-        job = ChangePlanService(get_database()).get(job_id, site_id)
+        job = ChangePlanService(_db()).get(job_id, site_id)
     except ValueError as e:
         return jsonify({"error": str(e)}), _status_for_error(str(e))
     return jsonify(job.to_dict())

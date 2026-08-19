@@ -12,6 +12,7 @@ from ..asset_taxonomy import infer_asset_class, infer_criticality, infer_operati
 from ..persistence.db import Database
 from ..persistence.repos import AssetRepo, EndpointRepo, ObservationRepo
 from ..domain.models import Observation
+from ..domain.events import DomainEvent, append_domain_event
 from ..persistence.db import new_uuid
 from ..services.reconciliation import ReconciliationService
 
@@ -45,6 +46,10 @@ class MergeService:
             endpoint = self._endpoints.get(endpoint_id)
             if not endpoint:
                 raise ValueError("endpoint not found")
+            if not endpoint.asset_id:
+                # An unassetized endpoint has no durable site scope.  Attaching
+                # it here would let a caller move an observation across orgs.
+                raise ValueError("endpoint has no site scope; reconcile it into the requested site first")
             if endpoint.asset_id:
                 endpoint_asset = self._assets.get(endpoint.asset_id)
                 if not endpoint_asset or endpoint_asset.site_id != site_id:
@@ -52,6 +57,18 @@ class MergeService:
             endpoint.asset_id = asset_id
             self._endpoints.save(endpoint)
             self._endpoints.deprecate_by_asset(asset_id, keep_endpoint_id=endpoint_id)
+            append_domain_event(
+                self._db,
+                DomainEvent(
+                    site_id=site_id,
+                    aggregate_type="camera_asset",
+                    aggregate_id=asset_id,
+                    event_type="camera_asset.endpoint_match_confirmed",
+                    actor="operator",
+                    justification=f"Confirmed endpoint {endpoint_id} belongs to asset {asset_id}",
+                    payload={"endpoint_id": endpoint_id},
+                ),
+            )
 
         self._obs.save(Observation(
             observation_id=new_uuid(),
@@ -89,6 +106,18 @@ class MergeService:
         ))
 
         self._assets.delete(remove_asset_id)
+        append_domain_event(
+            self._db,
+            DomainEvent(
+                site_id=site_id,
+                aggregate_type="camera_asset",
+                aggregate_id=keep_asset_id,
+                event_type="camera_asset.merged",
+                actor="operator",
+                justification=f"Merged asset {remove_asset_id} into {keep_asset_id}",
+                payload={"removed_asset_id": remove_asset_id},
+            ),
+        )
         return {"kept_asset_id": keep_asset_id, "removed_asset_id": remove_asset_id}
 
     def split_endpoint_to_asset(self, endpoint_id: str, new_asset_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -100,10 +129,11 @@ class MergeService:
         endpoint = self._endpoints.get(endpoint_id)
         if not endpoint:
             raise ValueError("endpoint not found")
-        if endpoint.asset_id:
-            current_asset = self._assets.get(endpoint.asset_id)
-            if not current_asset or current_asset.site_id != site_id:
-                raise ValueError("endpoint not found at site")
+        if not endpoint.asset_id:
+            raise ValueError("endpoint has no site scope; reconcile it into the requested site first")
+        current_asset = self._assets.get(endpoint.asset_id)
+        if not current_asset or current_asset.site_id != site_id:
+            raise ValueError("endpoint not found at site")
 
         from ..domain.models import CameraAsset
         asset_class = new_asset_data.get("asset_class") or infer_asset_class(endpoint.device_class)
@@ -129,6 +159,18 @@ class MergeService:
 
         endpoint.asset_id = new_asset.asset_id
         self._endpoints.save(endpoint)
+        append_domain_event(
+            self._db,
+            DomainEvent(
+                site_id=site_id,
+                aggregate_type="camera_asset",
+                aggregate_id=new_asset.asset_id,
+                event_type="camera_asset.split",
+                actor="operator",
+                justification=f"Split endpoint {endpoint_id} into a new asset",
+                payload={"endpoint_id": endpoint_id},
+            ),
+        )
 
         self._obs.save(Observation(
             observation_id=new_uuid(),

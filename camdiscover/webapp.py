@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import ipaddress
@@ -136,7 +136,7 @@ def create_app(
 
     def emit_event(event_type: str, data: dict):
         """Push an event to all SSE subscribers."""
-        payload = json.dumps({"type": event_type, "data": data, "timestamp": datetime.now().isoformat()})
+        payload = json.dumps({"type": event_type, "data": data, "timestamp": datetime.now(timezone.utc).isoformat()})
         dead = []
         for i, queue in enumerate(event_subscribers):
             try:
@@ -358,8 +358,7 @@ def create_app(
     def api_export_csv():
         import io
         output = io.StringIO()
-        export_to_csv(orchestrator.discovered_devices, output.name)
-        # Re-write using StringIO so we don't need a temp file
+        # Keep the response in memory; export_to_csv expects a filesystem path.
         import csv
         writer = csv.writer(output)
         writer.writerow([
@@ -754,7 +753,8 @@ def create_app(
     @app.route("/api/devices/<ip>/credentials", methods=["GET"])
     def api_creds_get(ip):
         c = _creds.get(ip, {})
-        return jsonify({"username": c.get("username", "admin"), "password": c.get("password", "")})
+        return jsonify({"username": c.get("username", "admin"),
+                        "has_password": bool(c.get("password"))})
 
     @app.route("/api/devices/<ip>/credentials", methods=["POST"])
     def api_creds_set(ip):

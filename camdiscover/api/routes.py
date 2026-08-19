@@ -112,6 +112,8 @@ def list_assets(site_id: str):
 def current_inventory():
     """Return persisted current inventory for the active or requested site."""
     site_id = request.args.get("site_id") or None
+    if not site_id:
+        return jsonify({"error": "site_id is required for scoped inventory"}), 400
     svc = _discovery_service()
     if svc is None:
         return jsonify([])
@@ -123,6 +125,7 @@ def verify_asset_location(site_id: str, asset_id: str):
     """Operator-confirmed physical attribution."""
     from ..persistence.repos import AssetRepo, LocationRepo
     from ..domain.models import Observation
+    from ..domain.transitions import ASSET_STATUS_TRANSITIONS, execute_transition
     from ..persistence.db import new_uuid
 
     body = request.json or {}
@@ -139,10 +142,25 @@ def verify_asset_location(site_id: str, asset_id: str):
         loc = location_repo.get(location_id)
         if not loc or loc.site_id != site_id:
             return jsonify({"error": "location not found"}), 404
-        asset.expected_location_id = location_id
-        asset.human_confirmed = True
-        asset.installed_status = "verified"
-        asset_repo.save(asset)
+        def verify_mutation():
+            asset.expected_location_id = location_id
+            asset.human_confirmed = True
+            asset.installed_status = "verified"
+            return asset_repo.save(asset)
+
+        execute_transition(
+            db,
+            aggregate_type="camera_asset",
+            aggregate_id=asset.asset_id,
+            site_id=site_id,
+            current_state=asset.installed_status,
+            target_state="verified",
+            allowed_transitions=ASSET_STATUS_TRANSITIONS,
+            mutate=verify_mutation,
+            actor="operator",
+            justification=body.get("detail", "Operator confirmed physical location."),
+            payload={"location_id": location_id},
+        )
 
     obs = Observation(
         observation_id=new_uuid(),

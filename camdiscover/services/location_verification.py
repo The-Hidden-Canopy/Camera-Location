@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..domain.models import CameraAsset, Observation, PhysicalLocation
+from ..domain.transitions import ASSET_STATUS_TRANSITIONS, execute_transition
 from ..persistence.db import Database, new_uuid
 from ..persistence.repos import AssetRepo, LocationRepo, ObservationRepo
 
@@ -92,16 +93,32 @@ class LocationVerificationService:
         if qr and not asset.qr_code:
             asset.qr_code = qr.strip()
 
-        asset.human_confirmed = True
-        asset.installed_status = "verified"
-        self._assets.save(asset)
+        detail = kwargs.get("detail", "Operator verified physical location.")
+
+        def verify_mutation():
+            asset.human_confirmed = True
+            asset.installed_status = "verified"
+            return self._assets.save(asset)
+
+        execute_transition(
+            self._db,
+            aggregate_type="camera_asset",
+            aggregate_id=asset.asset_id,
+            site_id=site_id,
+            current_state=asset.installed_status,
+            target_state="verified",
+            allowed_transitions=ASSET_STATUS_TRANSITIONS,
+            mutate=verify_mutation,
+            actor="operator",
+            justification=detail,
+            payload={"location_id": asset.expected_location_id, "qr_code": asset.qr_code},
+        )
 
         photo_refs: List[str] = []
         for photo in kwargs.get("photos") or []:
             ref = self.store_photo(site_id, asset_id, photo)
             photo_refs.append(ref)
 
-        detail = kwargs.get("detail", "Operator verified physical location.")
         if photo_refs:
             detail += f" Photo refs: {', '.join(photo_refs)}."
 

@@ -15,7 +15,7 @@ except Exception as _e:           # ModuleNotFoundError: No module named '_curse
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from .models import DiscoveredDevice
@@ -247,7 +247,7 @@ class Dashboard:
 
     def _export_results(self):
         from .report import export_to_csv, generate_summary
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         filename = f"camera-discovery-{timestamp}.csv"
         try:
             export_to_csv(self.devices, filename)

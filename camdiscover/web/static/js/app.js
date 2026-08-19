@@ -54,9 +54,44 @@
       ? await window.electronAPI.fetch(endpoint, options)
       : await fetch(endpoint, options);
     if (!response.ok) {
-      throw new Error(`API request failed (${response.status})`);
+      let detail = '';
+      try {
+        const body = await response.clone().json();
+        detail = body.error || body.detail || '';
+      } catch (_) { /* non-JSON error response */ }
+      throw new Error(detail || `API request failed (${response.status})`);
     }
     return response;
+  }
+
+  async function authenticatedMediaUrl(endpoint) {
+    if (!window.electronAPI || !window.electronAPI.getBackendSecrets) return endpoint;
+    const secrets = await window.electronAPI.getBackendSecrets();
+    const url = new URL(endpoint, secrets.url || window.location.origin);
+    if (secrets.token) url.searchParams.set('backend_token', secrets.token);
+    return url.toString();
+  }
+
+  async function downloadExport(endpoint, filename) {
+    try {
+      const response = await apiFetch(endpoint);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      addActivityEvent('error', error.message || `Export failed: ${filename}`);
+    }
+  }
+
+  function displayDeviceType(device) {
+    if (device && device.asset_class === 'workstation') return 'computer';
+    return (device && (device.device_type || device.device_class)) || 'unknown';
   }
 
   const app = $('#app');
@@ -597,6 +632,7 @@
     const observations = row.observations || [];
     const vendor = asset.manufacturer || 'Unknown';
     const model = asset.model || '';
+    const freshness = row.freshness || { state: 'unknown', as_of: endpoint.last_seen || null };
     const openPorts = [];
     const protocols = new Set();
     const addPort = (value) => {
@@ -638,7 +674,7 @@
       15,
       Math.min(
         95,
-        (asset.asset_type === 'camera' ? 35 : 20) +
+        (asset.asset_class === 'camera' ? 35 : 20) +
         (endpoint.device_class === 'camera' ? 20 : 0) +
         (asset.serial ? 8 : 0) +
         (asset.onvif_uuid ? 10 : 0) +
@@ -684,7 +720,8 @@
       dpi_summary: 'Derived from persisted evidence',
       subnet_zone: '',
       device_class: endpoint.device_class || 'unknown',
-      device_type: endpoint.device_class || 'unknown',
+      device_type: asset.asset_class === 'workstation' ? 'computer' : (endpoint.device_class || 'unknown'),
+      asset_class: asset.asset_class || '',
       device_type_confidence: 55,
       warn_reset: false,
       suspected_old_gateway: '',
@@ -697,6 +734,9 @@
       installed_status: asset.installed_status || '',
       expected_location_id: asset.expected_location_id || '',
       observation_count: observations.length,
+      freshness_state: freshness.state || 'unknown',
+      stale: freshness.state === 'stale',
+      freshness_as_of: freshness.as_of || endpoint.last_seen || '',
     };
   }
 
@@ -849,11 +889,11 @@
     });
 
     // Export
-    on(exportCsv, 'click', () => window.open('/api/export/csv', '_blank'));
-    on(exportJson, 'click', () => window.open('/api/export/json', '_blank'));
+    on(exportCsv, 'click', () => downloadExport('/api/export/csv', 'network-discovery.csv'));
+    on(exportJson, 'click', () => downloadExport('/api/export/json', 'network-discovery.json'));
     const exportHtml = $('#export-html');
     if (exportHtml) {
-      on(exportHtml, 'click', () => window.open('/api/export/html', '_blank'));
+      on(exportHtml, 'click', () => downloadExport('/api/export/html', 'network-discovery.html'));
     }
 
     // Search
@@ -1110,12 +1150,13 @@
       const confidenceHtml = renderConfidence(device.confidence);
       const actionLinks = renderActionLinks(device);
       const persistedBadge = device.persisted
-        ? `<span class="cam__record-badge" title="Site inventory record">REC</span>`
+        ? `<span class="cam__record-badge" title="${device.stale ? 'Persisted record is older than 24 hours' : 'Site inventory record'}">${device.stale ? 'STALE' : 'REC'}</span>`
         : '';
 
       // Classification badges
-      const dcBadge = device.device_type && device.device_type !== 'unknown'
-        ? `<span style="font-size:9px;padding:0 3px;border-radius:2px;background:#21262d;color:#8b949e;margin-left:3px">${esc(device.device_type.replace(/_/g, ' '))}</span>`
+      const displayType = displayDeviceType(device);
+      const dcBadge = displayType !== 'unknown'
+        ? `<span style="font-size:9px;padding:0 3px;border-radius:2px;background:#21262d;color:#8b949e;margin-left:3px">${esc(displayType.replace(/_/g, ' '))}</span>`
         : '';
       const warnBadge = device.warn_reset
         ? `<span style="font-size:9px;padding:0 3px;border-radius:2px;background:#4a1010;color:#f85149;margin-left:3px" title="Do not reset">&#9888; no-reset</span>`
@@ -1168,7 +1209,9 @@
       ['Asset ID', device.asset_id || '\u2014'],
       ['Endpoint ID', device.endpoint_id || '\u2014'],
       ['Vendor', device.vendor],
-      ['Device Type', device.device_type || device.device_class || 'unknown'],
+      ['Device Type', displayDeviceType(device)],
+      ...(device.asset_class ? [['Asset Class', device.asset_class]] : []),
+      ...(device.freshness_state ? [['Freshness', `${device.freshness_state}${device.freshness_as_of ? ` — as of ${new Date(device.freshness_as_of).toLocaleString()}` : ''}`]] : []),
       ['Type Confidence', `${device.device_type_confidence != null ? device.device_type_confidence : 0}%`],
       ['Model', device.model || '\u2014'],
       ['Hostname', device.hostname || '\u2014'],
@@ -1298,7 +1341,7 @@
 
   function renderActionLinks(device) {
     let html = '<div class="cam__action-links">';
-    const deviceType = device.device_type || device.device_class || 'unknown';
+    const deviceType = displayDeviceType(device);
     const cameraish = ['camera', 'nvr'].includes(deviceType) || device.confidence >= 40;
     if (cameraish) {
       html += `<a class="cam__action-link cam__action-link--view" title="View camera" onclick="event.preventDefault(); event.stopPropagation(); window._viewCamera('${esc(device.ip)}')">&#128247;</a>`;
@@ -1360,7 +1403,7 @@
 
     return devices.filter(d => {
       if (query) {
-        const haystack = `${d.ip} ${d.mac} ${d.vendor} ${d.model} ${d.hostname} ${d.subnet_zone || ''} ${d.device_type || d.device_class || ''}`.toLowerCase();
+        const haystack = `${d.ip} ${d.mac} ${d.vendor} ${d.model} ${d.hostname} ${d.subnet_zone || ''} ${displayDeviceType(d)} ${d.asset_class || ''}`.toLowerCase();
         if (!haystack.includes(query)) return false;
       }
       if (d.confidence < minConfidence) return false;
@@ -1373,7 +1416,7 @@
         if (!activeVendors.some(v => d.vendor === v)) return false;
       }
       if (activeTypes.length > 0) {
-        const dtype = d.device_type || d.device_class || 'unknown';
+        const dtype = displayDeviceType(d);
         if (!activeTypes.includes(dtype)) return false;
       }
       if (activeSubnets.length > 0) {
@@ -1473,7 +1516,8 @@
         ['Serial', device.serial || '\u2014'],
         ['ONVIF UUID', device.onvif_uuid || '\u2014'],
         ['Vendor', device.vendor],
-        ['Device Type', device.device_type || device.device_class || 'unknown'],
+        ['Device Type', displayDeviceType(device)],
+        ...(device.asset_class ? [['Asset Class', device.asset_class]] : []),
         ['Type Confidence', `${device.device_type_confidence != null ? device.device_type_confidence : 0}%`],
         ['Model', device.model || '\u2014'],
         ['Hostname', device.hostname || '\u2014'],
@@ -1553,7 +1597,7 @@
   // ─── Stats & filters ────────────────────────────────────────────────
   function updateStats() {
     const total = devices.length;
-    const cameras = devices.filter(d => (d.device_type || d.device_class) === 'camera' || d.confidence >= 40).length;
+    const cameras = devices.filter(d => displayDeviceType(d) === 'camera' || d.confidence >= 40).length;
     const onvif = devices.filter(d => d.onvif_status === 'found').length;
     const rtsp = devices.filter(d => d.rtsp_status === 'found').length;
 
@@ -1605,7 +1649,7 @@
   function updateTypeFilters() {
     const counts = {};
     devices.forEach(d => {
-      const dtype = d.device_type || d.device_class || 'unknown';
+      const dtype = displayDeviceType(d);
       counts[dtype] = (counts[dtype] || 0) + 1;
     });
 
@@ -1954,7 +1998,7 @@
     window._setViewerMode(ip, mode);
   };
 
-  window._setViewerMode = function(ip, mode) {
+  window._setViewerMode = async function(ip, mode) {
     const img     = document.getElementById('viewer-img');
     const errEl   = document.getElementById('viewer-snap-error');
     const snapBtn = document.getElementById('viewer-btn-snap');
@@ -1971,7 +2015,7 @@
       img.src = '';
       if (errEl) errEl.style.display = 'none';
       img.style.opacity = '0.4';
-      const streamUrl = `/api/devices/${encodeURIComponent(ip)}/stream?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`;
+      const streamUrl = await authenticatedMediaUrl(`/api/devices/${encodeURIComponent(ip)}/stream?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`);
       img.onload  = () => { img.style.opacity = '1'; };
       img.onerror = () => {
         img.style.opacity = '0';
@@ -2024,14 +2068,14 @@
     if (btn) { btn.disabled = false; btn.innerHTML = '&#9881; ONVIF Info'; }
   };
 
-  window._refreshSnapshot = function(ip) {
+  window._refreshSnapshot = async function(ip) {
     const img   = document.getElementById('viewer-img');
     const errEl = document.getElementById('viewer-snap-error');
     if (!img) return;
     const user = (document.getElementById('viewer-user') || {}).value || 'admin';
     const pass = (document.getElementById('viewer-pass') || {}).value || '';
     const ts   = Date.now();
-    const url  = `/api/devices/${encodeURIComponent(ip)}/snapshot?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}&_=${ts}`;
+    const url  = await authenticatedMediaUrl(`/api/devices/${encodeURIComponent(ip)}/snapshot?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}&_=${ts}`);
     img.src = '';
     img.style.opacity = '0.4';
     if (errEl) errEl.style.display = 'none';
@@ -2049,7 +2093,7 @@
 
     const html = `<div class="cam__setip-dialog" onclick="if(event.target===this)this.remove()">
       <div class="cam__setip-dialog__inner">
-        <div class="cam__setip-dialog__title">&#9998; Change IP &mdash; ${esc(ip)}</div>
+        <div class="cam__setip-dialog__title">&#9998; Propose IP Change &mdash; ${esc(ip)}</div>
         <div class="cam__setip-info">
           <span class="cam__vendor-badge ${getVendorClass(device.vendor || '')}">${esc(device.vendor || 'Unknown')}</span>
           MAC: ${esc(device.mac || '—')}
@@ -2066,18 +2110,10 @@
           <label>Default Gateway</label>
           <input type="text" id="setip-gw" placeholder="192.168.1.1" value="${esc(defaultGw)}" class="cam__setip-input">
         </div>
-        <div class="cam__setip-field">
-          <label>Username</label>
-          <input type="text" id="setip-user" placeholder="admin" value="admin" class="cam__setip-input">
-        </div>
-        <div class="cam__setip-field">
-          <label>Password</label>
-          <input type="password" id="setip-pass" placeholder="camera password" class="cam__setip-input">
-        </div>
         <div class="cam__setip-result" id="setip-result" style="display:none"></div>
         <div class="cam__setip-actions">
           <button class="cam__subnet-dialog__btn cam__subnet-dialog__btn--cancel" onclick="this.closest('.cam__setip-dialog').remove()">Cancel</button>
-          <button class="cam__subnet-dialog__btn cam__subnet-dialog__btn--add" id="setip-submit-btn" onclick="window._submitSetIP('${esc(ip)}')">Apply</button>
+          <button class="cam__subnet-dialog__btn cam__subnet-dialog__btn--add" id="setip-submit-btn" onclick="window._submitSetIP('${esc(ip)}')">Propose Plan</button>
         </div>
       </div>
     </div>`;
@@ -2091,26 +2127,39 @@
     const newIp   = document.getElementById('setip-newip').value.trim();
     const netmask = document.getElementById('setip-mask').value.trim();
     const gateway = document.getElementById('setip-gw').value.trim();
-    const username = document.getElementById('setip-user').value.trim();
-    const password = document.getElementById('setip-pass').value;
     const resultEl = document.getElementById('setip-result');
     const btn = document.getElementById('setip-submit-btn');
+    const device = devices.find(d => d.ip === ip) || {};
 
     if (!newIp) { resultEl.textContent = 'New IP is required.'; resultEl.style.display = ''; return; }
 
     btn.disabled = true;
-    btn.textContent = 'Applying...';
+    btn.textContent = 'Proposing...';
     resultEl.style.display = 'none';
 
     try {
-      const resp = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/set-ip`, {
+      if (!currentSiteId || !device.endpoint_id) {
+        throw new Error('Bind a site and reconcile this device before proposing a governed IP change.');
+      }
+      const resp = await apiFetch('/api/change-plans', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ new_ip: newIp, netmask, gateway, username, password }),
+        body: JSON.stringify({
+          site_id: currentSiteId,
+          endpoint_id: device.endpoint_id,
+          new_ip: newIp,
+          mask: netmask,
+          gateway,
+          user_id: 'operator',
+        }),
       });
       const result = await resp.json();
       resultEl.style.display = '';
-      if (result.success) {
+      if (result.job_id) {
+        resultEl.className = 'cam__setip-result cam__setip-result--ok';
+        resultEl.textContent = `Plan ${result.job_id} proposed (${result.status}). Approve and execute it from the governed workflow.`;
+        addActivityEvent('found', `IP change plan proposed for ${ip} -> ${newIp}`);
+      } else if (result.success) {
         resultEl.className = 'cam__setip-result cam__setip-result--ok';
         resultEl.textContent = `✓ ${result.message || 'IP change sent. Camera may reboot.'}`;
         addActivityEvent('found', `IP change sent to ${ip} → ${newIp} (${result.method})`);
@@ -2122,10 +2171,10 @@
     } catch(e) {
       resultEl.style.display = '';
       resultEl.className = 'cam__setip-result cam__setip-result--err';
-      resultEl.textContent = 'Network error contacting server.';
+      resultEl.textContent = e.message || 'Unable to create governed change plan.';
     }
     btn.disabled = false;
-    btn.textContent = 'Apply';
+    btn.textContent = 'Propose Plan';
   };
 
   function closeAnyDialog() {

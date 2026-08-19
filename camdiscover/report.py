@@ -6,7 +6,7 @@ import csv
 import json
 import os
 import html
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from .models import DiscoveredDevice
@@ -115,7 +115,7 @@ def _dpi_table(dev: DiscoveredDevice) -> str:
 def export_to_html(devices: List[DiscoveredDevice], filename: str) -> str:
     """Export a comprehensive HTML asset report with evidence ledger, DPI stages,
     classification rationale, and operator notes."""
-    now = datetime.now().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     total = len(devices)
     cameras = [d for d in devices if d.device_class == "camera"]
     nvrs = [d for d in devices if d.device_class == "nvr"]
@@ -213,7 +213,7 @@ def generate_summary(devices: List[DiscoveredDevice]) -> str:
     lines.append("       CAMERA DISCOVERY OCTOPUS  —  REPORT")
     lines.append("=" * 66)
     lines.append("")
-    lines.append(f"Generated: {datetime.now().isoformat()}")
+    lines.append(f"Generated: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"Total devices found: {len(devices)}")
     lines.append("")
 

@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from . import __version__, CAMERA_PORTS, DISCOVERY_MODES
@@ -241,7 +241,7 @@ def run_cli_mode(
                 export_to_csv(devices, output_file)
             print_success(f"  Exported to: {output_file}")
         else:
-            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             csv_file = f"camera-discovery-{timestamp}.csv"
             export_to_csv(devices, csv_file)
             print_success(f"  Auto-exported to: {csv_file}")

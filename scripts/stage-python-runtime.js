@@ -71,16 +71,32 @@ function main() {
     'itsdangerous',
     'markupsafe',
   ];
-  const probe = verifyPythonModules(path.join(targetRuntime, 'python.exe'), requiredModules);
+  const targetPython = path.join(targetRuntime, 'python.exe');
+  let probe = verifyPythonModules(targetPython, requiredModules);
   if (probe.status !== 0) {
-    const missingModules = (probe.stdout || probe.stderr || '')
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    throw new Error(
-      `Bundled runtime is missing required Python modules: ${missingModules.join(', ')}. ` +
-      `Populate the source runtime with app dependencies before packaging.`
+    const requirementsPath = path.join(repoRoot, 'requirements.txt');
+    if (!fs.existsSync(requirementsPath)) {
+      throw new Error('requirements.txt is missing; cannot install app dependencies into the bundled runtime.');
+    }
+
+    log('installing app dependencies into the bundled runtime');
+    const install = spawnSync(
+      targetPython,
+      ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '-r', requirementsPath],
+      { stdio: 'inherit' }
     );
+    if (install.status !== 0) {
+      throw new Error('Could not install app dependencies into the bundled runtime.');
+    }
+
+    probe = verifyPythonModules(targetPython, requiredModules);
+    if (probe.status !== 0) {
+      const missingModules = (probe.stdout || probe.stderr || '')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      throw new Error(`Bundled runtime is still missing required Python modules: ${missingModules.join(', ')}.`);
+    }
   }
 
   log(`staged runtime from ${sourceRuntime} to ${targetRuntime}`);
