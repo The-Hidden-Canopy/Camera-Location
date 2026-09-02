@@ -539,6 +539,12 @@ def create_app(
         device = orchestrator.devices.get(ip)
         username = request.args.get("user", "admin")
         password = request.args.get("pass", "")
+        # UI passes a short timeout so clicking ONVIF Info on a non-ONVIF host
+        # does not lock the renderer for the default 5+ seconds per SOAP call.
+        try:
+            timeout = float(request.args.get("timeout", "8"))
+        except Exception:
+            timeout = 8.0
         # If no stored URL, try each open HTTP port in preference order.
         # Port 8899 is a proprietary default; most cameras use 80 or 8080.
         onvif_url = (device.onvif_url if device else "") or ""
@@ -550,7 +556,7 @@ def create_app(
             else:
                 onvif_url = f"http://{ip}:80/onvif/device_service"
         from .discovery import query_onvif_device_audit
-        audit = query_onvif_device_audit(ip, onvif_url, username, password)
+        audit = query_onvif_device_audit(ip, onvif_url, username, password, timeout=timeout)
         return jsonify({
             "manufacturer": audit.manufacturer,
             "model": audit.model,
@@ -765,6 +771,9 @@ def create_app(
         # Gap 7: mirror into orchestrator so active probes (ONVIF, RTSP)
         # can use saved credentials without the user having to re-run a scan.
         orchestrator.credentials[ip] = entry
+        # Re-queue the device for camera validation so "Save & Load" actually
+        # re-applies the new credentials to ONVIF/RTSP checks.
+        orchestrator.requeue_camera_validation(ip)
         return jsonify({"saved": True})
 
     # ─── Set IP ───────────────────────────────────────────────────────

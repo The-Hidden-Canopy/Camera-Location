@@ -32,6 +32,7 @@
   let capturePosition = { position: 'ethernet_same', can_see_unicast: true, can_see_rtsp: true };
   let isWatching = false;
   let sniffedSubnets = [];   // subnets detected by the sniffer
+  let viewerPasswordCache = {}; // ip -> password (renderer memory only)
 
   // DPI stage order for display
   const DPI_STAGES = ['link','dhcp','discovery','auth','rtsp','onvif_ctrl','ntp','dns','cloud','recording'];
@@ -149,12 +150,32 @@
     await loadPersistedInventory();
     syncDisplayedDevices();
     purgeSweepSubnetStorage();
-    initTriagePanel();
+    initBottomTray();
     initSensorBanner();
-    initLostPanel();
     await refreshInterfaceProfile();
     setInterval(refreshInterfaceProfile, 15000);
-    setInterval(refreshLostDevices, 5000);
+    startScanStatusPolling();
+  }
+
+  // Poll scan status as a backstop so a missed SSE event cannot leave the
+  // UI stuck in "Scanning" forever.
+  function startScanStatusPolling() {
+    if (scanStatusIntervalId) clearInterval(scanStatusIntervalId);
+    scanStatusIntervalId = setInterval(pollScanStatus, 3000);
+  }
+
+  async function pollScanStatus() {
+    try {
+      const resp = await apiFetch('/api/status');
+      if (!resp.ok) return;
+      const status = await resp.json();
+      if (!status.scanning && isScanning) {
+        // Backend scan finished without us seeing the SSE event.
+        setScanning(false);
+        await loadExistingDevices();
+        scheduleRender();
+      }
+    } catch(_) {}
   }
 
   function purgeSweepSubnetStorage() {
@@ -164,111 +185,77 @@
     try { localStorage.removeItem('cam_sweep_subnets'); } catch(_) {}
   }
 
-  // ─── Triage panel ───────────────────────────────────────────────────
-  // Self-contained: builds its own DOM + styles and polls /api/triage so
-  // the operator can see the single sequential worker's current task and
-  // the four priority queues (known scope, mismatch, lost networks,
-  // orphans) without any change to index.html / dashboard.css.
+  // ─── Bottom tray (Triage + Lost/Mismatched) ─────────────────────────
+  // Replaces the two floating bottom panels with a single layout-owned tray
+  // that collapses to a thin bar and never overlays the device table.
 
-  function initTriagePanel() {
-    const style = document.createElement('style');
-    style.textContent = `
-      #triage-panel{position:fixed;right:14px;bottom:54px;width:340px;max-height:60vh;
-        overflow:auto;background:#0d1117f2;border:1px solid #30363d;border-radius:8px;
-        font:11px/1.4 ui-monospace,Consolas,monospace;color:#c9d1d9;z-index:9000;
-        box-shadow:0 6px 24px #000a}
-      #triage-panel h4{margin:0;padding:8px 10px;background:#161b22;border-bottom:1px solid #30363d;
-        font-size:11px;letter-spacing:.08em;color:#58a6ff;display:flex;justify-content:space-between;cursor:pointer}
-      #triage-panel .tp-body{padding:8px 10px}
-      #triage-panel .tp-task{color:#7ee787;margin-bottom:8px;word-break:break-word}
-      #triage-panel .tp-sec{margin:6px 0 2px;color:#d29922;text-transform:uppercase;font-size:10px;letter-spacing:.06em}
-      #triage-panel .tp-row{display:flex;justify-content:space-between;gap:8px;padding:1px 0;border-bottom:1px solid #21262d}
-      #triage-panel .tp-row span:last-child{color:#8b949e;white-space:nowrap}
-      #triage-panel .tp-empty{color:#484f58}
-      #triage-panel.tp-collapsed .tp-body{display:none}
-      #triage-panel .tp-ingest-btn{background:#21262d;border:1px solid #30363d;color:#58a6ff;
-        border-radius:4px;font:10px ui-monospace,monospace;padding:1px 6px;cursor:pointer;margin-left:6px}
-      #tp-modal{position:fixed;inset:0;background:#000a;z-index:9500;display:flex;
-        align-items:center;justify-content:center}
-      #tp-modal .box{background:#0d1117;border:1px solid #30363d;border-radius:8px;
-        width:480px;max-width:92vw;padding:14px;font:12px ui-monospace,monospace;color:#c9d1d9}
-      #tp-modal h3{margin:0 0 8px;color:#58a6ff;font-size:13px}
-      #tp-modal select,#tp-modal textarea{width:100%;background:#161b22;color:#c9d1d9;
-        border:1px solid #30363d;border-radius:4px;padding:6px;font:12px ui-monospace,monospace;margin:4px 0}
-      #tp-modal textarea{height:180px;resize:vertical}
-      #tp-modal .row{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
-      #tp-modal button{padding:5px 12px;border-radius:4px;border:1px solid #30363d;
-        background:#21262d;color:#c9d1d9;cursor:pointer}
-      #tp-modal button.go{background:#1f6feb;color:#fff;border-color:#1f6feb}`;
-    document.head.appendChild(style);
+  let trayExpanded = false;
+  let trayActiveTab = 'triage';
+  let triageIntervalId = null;
+  let lostIntervalId = null;
+  let scanStatusIntervalId = null;
 
-    const el = document.createElement('div');
-    el.id = 'triage-panel';
-    el.innerHTML =
-      '<h4><span>&#9673; TRIAGE ENGINE ' +
-      '<button class="tp-ingest-btn" id="tp-ingest">+ Ingest</button></span>' +
-      '<span id="tp-toggle">&#9472;</span></h4>' +
-      '<div class="tp-body" id="tp-body"><div class="tp-empty">Idle.</div></div>';
-    document.body.appendChild(el);
-    el.querySelector('#tp-toggle').addEventListener('click', () =>
-      el.classList.toggle('tp-collapsed'));
-    el.querySelector('#tp-ingest').addEventListener('click', (e) => {
-      e.stopPropagation();
-      openIngestModal();
-    });
+  function initBottomTray() {
+    const tray = document.getElementById('bottom-tray');
+    const header = document.getElementById('bottom-tray-header');
+    if (!tray || !header) return;
 
-    setInterval(refreshTriage, 2500);
-    refreshTriage();
-  }
-
-  function openIngestModal() {
-    if (document.getElementById('tp-modal')) return;
-    const m = document.createElement('div');
-    m.id = 'tp-modal';
-    m.innerHTML =
-      '<div class="box">' +
-      '<h3>Ingest out-of-band evidence (silent / orphaned devices)</h3>' +
-      '<select id="tp-kind">' +
-      '<option value="switch_mac">Switch MAC / port table</option>' +
-      '<option value="dhcp_lease">DHCP lease list</option>' +
-      '<option value="arp">Router ARP dump</option>' +
-      '<option value="lldp">LLDP neighbor detail</option>' +
-      '<option value="snmp">SNMP sysName / sysDescr text</option>' +
-      '<option value="dns">DNS or reverse-DNS name list</option>' +
-      '<option value="nvr">NVR camera/channel list</option>' +
-      '</select>' +
-      '<textarea id="tp-text" placeholder="Paste switch MAC table, DHCP leases, arp -a, LLDP neighbor text, SNMP output, DNS names, or NVR channel list here..."></textarea>' +
-      '<div class="row">' +
-      '<button id="tp-cancel">Cancel</button>' +
-      '<button class="go" id="tp-submit">Ingest</button>' +
-      '</div></div>';
-    document.body.appendChild(m);
-    const close = () => m.remove();
-    m.addEventListener('click', (e) => { if (e.target === m) close(); });
-    document.getElementById('tp-cancel').addEventListener('click', close);
-    document.getElementById('tp-submit').addEventListener('click', async () => {
-      const kind = document.getElementById('tp-kind').value;
-      const text = document.getElementById('tp-text').value;
-      if (!text.trim()) { close(); return; }
-      try {
-        const r = await apiFetch('/api/triage/ingest', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind, text }),
-        });
-        const j = await r.json();
-        if (j.summary) {
-          addActivityEvent('found',
-            `Ingested ${kind}: +${j.summary.orphans} orphan, ` +
-            `+${j.summary.mismatch} mismatch, +${j.summary.candidates} candidate`);
-        }
-      } catch(_) {
-        addActivityEvent('error', 'Ingest failed');
+    header.addEventListener('click', (e) => {
+      const tabBtn = e.target.closest('[data-tray-tab]');
+      if (tabBtn) {
+        setTrayTab(tabBtn.dataset.trayTab);
+        if (!trayExpanded) setTrayExpanded(true);
+        return;
       }
-      close();
-      refreshTriage();
+      const toggle = e.target.closest('#tray-toggle');
+      if (toggle) {
+        setTrayExpanded(!trayExpanded);
+        return;
+      }
+      const refresh = e.target.closest('#tray-refresh');
+      if (refresh) {
+        refreshTriage();
+        refreshLostDevices();
+        return;
+      }
+      const ingest = e.target.closest('#tray-ingest');
+      if (ingest) {
+        openIngestModal();
+      }
     });
+
+    // Slow polling when collapsed, normal when expanded.
+    scheduleTrayPolling();
+    refreshTriage();
+    refreshLostDevices();
   }
+
+  function setTrayTab(tab) {
+    trayActiveTab = tab;
+    const tray = document.getElementById('bottom-tray');
+    tray.querySelectorAll('[data-tray-tab]').forEach(b =>
+      b.classList.toggle('cam__tray__tab--active', b.dataset.trayTab === tab));
+    tray.querySelectorAll('.cam__tray__panel').forEach(p =>
+      p.classList.toggle('cam__tray__panel--active', p.id === `tray-panel-${tab}`));
+  }
+
+  function setTrayExpanded(expanded) {
+    trayExpanded = expanded;
+    const tray = document.getElementById('bottom-tray');
+    tray.classList.toggle('cam__tray--collapsed', !expanded);
+    scheduleTrayPolling();
+  }
+
+  function scheduleTrayPolling() {
+    if (triageIntervalId) clearInterval(triageIntervalId);
+    if (lostIntervalId) clearInterval(lostIntervalId);
+    const triageMs = trayExpanded ? 3000 : 12000;
+    const lostMs   = trayExpanded ? 6000 : 18000;
+    triageIntervalId = setInterval(refreshTriage, triageMs);
+    lostIntervalId   = setInterval(refreshLostDevices, lostMs);
+  }
+
+
 
   async function refreshTriage() {
     let s;
@@ -278,33 +265,36 @@
       s = await r.json();
     } catch(_) { return; }
 
+    const body = document.getElementById('tray-panel-triage');
+    if (!body) return;
+
     const rows = (arr, fmt) => arr.length
       ? arr.map(fmt).join('')
-      : '<div class="tp-empty">none</div>';
+      : '<div class="cam__tray__empty">none</div>';
 
     const scope = (s.known_scopes || []).map(k =>
-      `<div class="tp-row"><span>${esc(k.cidr)} <em>(${esc(k.source)})</em></span>` +
+      `<div class="cam__tray__row"><span>${esc(k.cidr)} <em>(${esc(k.source)})</em></span>` +
       `<span>${k.completed ? 'done' : (k.next_host + '/254')}</span></div>`).join('')
-      || '<div class="tp-empty">none</div>';
+      || '<div class="cam__tray__empty">none</div>';
 
     const mm = rows((s.mismatch || []).slice(0, 12), m =>
-      `<div class="tp-row"><span>${esc(m.ip)}</span>` +
+      `<div class="cam__tray__row"><span>${esc(m.ip)}</span>` +
       `<span title="${esc(m.reason)}">${esc(m.status)}</span></div>`);
 
     const cand = rows((s.candidates || []).slice(0, 12), c =>
-      `<div class="tp-row"><span>${esc(c.cidr)} ${c.confidence}%</span>` +
+      `<div class="cam__tray__row"><span>${esc(c.cidr)} ${c.confidence}%</span>` +
       `<span>${esc(c.status)}</span></div>`);
 
     const orph = rows((s.orphans || []).slice(0, 10), o =>
-      `<div class="tp-row"><span>${esc(o.ip || o.mac)}</span>` +
+      `<div class="cam__tray__row"><span>${esc(o.ip || o.mac)}</span>` +
       `<span>${esc(o.status)}</span></div>`);
 
     const gwmm = rows((s.gateway_mismatch || []).slice(0, 6), g =>
-      `<div class="tp-row"><span>${esc(g.ip)}</span>` +
+      `<div class="cam__tray__row"><span>${esc(g.ip)}</span>` +
       `<span title="${esc(g.reason)}" style="color:#d29922">&#8594; ${esc(g.observed_target_gateway || '?')}</span></div>`);
 
     const mcast = rows((s.multicast_groups || []).slice(0, 6), g =>
-      `<div class="tp-row"><span>${esc(g.group)}</span>` +
+      `<div class="cam__tray__row"><span>${esc(g.group)}</span>` +
       `<span style="color:#8b949e">${esc(g.protocol_hint)} &#183; ${g.packet_count}pkt</span></div>`);
 
     const p5 = rows((s.camera_validation || []).slice(0, 8), v => {
@@ -317,19 +307,28 @@
         v.http_ok  ? 'HTTP'  : null,
         v.nvr_match? 'NVR'   : null,
       ].filter(Boolean).join(' ');
-      return `<div class="tp-row"><span>${esc(v.ip)}</span>` +
+      return `<div class="cam__tray__row"><span>${esc(v.ip)}</span>` +
         `<span style="color:${statusColour}">${esc(v.status)}${checks ? ' ' + checks : ''}</span></div>`;
     });
 
-    document.getElementById('tp-body').innerHTML =
-      `<div class="tp-task">${esc(s.current_task || 'Idle.')}</div>` +
-      `<div class="tp-sec">P1 Known scopes</div>${scope}` +
-      `<div class="tp-sec">P2 Mismatch (one at a time)</div>${mm}` +
-      `<div class="tp-sec">Gateway mismatch (old static config)</div>${gwmm}` +
-      `<div class="tp-sec">P3 Lost / candidate networks</div>${cand}` +
-      `<div class="tp-sec">P4 Orphans</div>${orph}` +
-      `<div class="tp-sec">P5 Camera validation (Arm 7)</div>${p5}` +
-      `<div class="tp-sec">Multicast groups (monitor only)</div>${mcast}`;
+    body.innerHTML =
+      `<div class="cam__tray__task">${esc(s.current_task || 'Idle.')}</div>` +
+      `<div class="cam__tray__sec">P1 Known scopes</div>${scope}` +
+      `<div class="cam__tray__sec">P2 Mismatch (one at a time)</div>${mm}` +
+      `<div class="cam__tray__sec">Gateway mismatch (old static config)</div>${gwmm}` +
+      `<div class="cam__tray__sec">P3 Lost / candidate networks</div>${cand}` +
+      `<div class="cam__tray__sec">P4 Orphans</div>${orph}` +
+      `<div class="cam__tray__sec">P5 Camera validation (Arm 7)</div>${p5}` +
+      `<div class="cam__tray__sec">Multicast groups (monitor only)</div>${mcast}`;
+
+    const badge = document.getElementById('tray-badge-triage');
+    if (badge) {
+      const total = (s.mismatch || []).length + (s.gateway_mismatch || []).length +
+                    (s.orphans || []).length + (s.candidates || []).length +
+                    (s.camera_validation || []).length;
+      badge.textContent = total;
+      badge.style.display = total ? '' : 'none';
+    }
   }
 
   // ─── Sensor quality banner ──────────────────────────────────────────
@@ -402,46 +401,6 @@
     } catch(_) {}
   }
 
-  // ─── Lost / Mismatched Devices panel ───────────────────────────────
-  // Separate floating panel showing gateway-mismatch, mismatch, and orphan
-  // queues — devices that are "lost but communicating".
-
-  function initLostPanel() {
-    const style = document.createElement('style');
-    style.textContent = `
-      #lost-panel{position:fixed;left:14px;bottom:54px;width:360px;max-height:55vh;
-        overflow:auto;background:#0d1117f2;border:1px solid #30363d;border-radius:8px;
-        font:11px/1.4 ui-monospace,Consolas,monospace;color:#c9d1d9;z-index:8900;
-        box-shadow:0 6px 24px #000a}
-      #lost-panel h4{margin:0;padding:8px 10px;background:#161b22;border-bottom:1px solid #30363d;
-        font-size:11px;letter-spacing:.08em;color:#f0883e;display:flex;justify-content:space-between;cursor:pointer}
-      #lost-panel .lp-body{padding:8px 10px}
-      #lost-panel .lp-sec{margin:6px 0 2px;color:#d29922;text-transform:uppercase;font-size:10px;letter-spacing:.06em}
-      #lost-panel .lp-row{padding:3px 0;border-bottom:1px solid #21262d}
-      #lost-panel .lp-row .ip{color:#58a6ff;font-weight:bold}
-      #lost-panel .lp-row .badge{display:inline-block;font-size:9px;padding:0 4px;border-radius:2px;
-        background:#4a1010;color:#f85149;margin-left:4px}
-      #lost-panel .lp-row .badge.gw{background:#2b2000;color:#d29922}
-      #lost-panel .lp-row .badge.orphan{background:#0d2040;color:#58a6ff}
-      #lost-panel .lp-row .detail{color:#8b949e;font-size:10px;margin-top:1px}
-      #lost-panel .lp-row .next{color:#3fb950;font-size:10px}
-      #lost-panel .lp-row .warn-reset{color:#f85149;font-weight:bold;font-size:10px}
-      #lost-panel .lp-empty{color:#484f58}
-      #lost-panel.lp-collapsed .lp-body{display:none}
-      #lost-panel .lp-total{margin-left:6px;font-size:10px;background:#21262d;
-        border-radius:3px;padding:0 5px;color:#f0883e}`;
-    document.head.appendChild(style);
-
-    const el = document.createElement('div');
-    el.id = 'lost-panel';
-    el.innerHTML =
-      '<h4><span>&#9888; LOST / MISMATCHED <span id="lp-total" class="lp-total">0</span></span>' +
-      '<span id="lp-toggle">&#9472;</span></h4>' +
-      '<div class="lp-body" id="lp-body"><div class="lp-empty">No lost devices detected.</div></div>';
-    document.body.appendChild(el);
-    el.querySelector('#lp-toggle').addEventListener('click', () =>
-      el.classList.toggle('lp-collapsed'));
-  }
 
   async function refreshLostDevices() {
     try {
@@ -450,13 +409,15 @@
       const data = await r.json();
 
       const total = data.total || 0;
-      const tot = document.getElementById('lp-total');
-      if (tot) tot.textContent = total;
-
-      const body = document.getElementById('lp-body');
+      const body = document.getElementById('tray-panel-lost');
+      const badge = document.getElementById('tray-badge-lost');
+      if (badge) {
+        badge.textContent = total;
+        badge.style.display = total ? '' : 'none';
+      }
       if (!body) return;
       if (total === 0) {
-        body.innerHTML = '<div class="lp-empty">No lost devices detected.</div>';
+        body.innerHTML = '<div class="cam__tray__empty">No lost devices detected.</div>';
         return;
       }
 
@@ -464,10 +425,10 @@
 
       // Gateway mismatches — most urgent
       if (data.gateway_mismatches && data.gateway_mismatches.length) {
-        html += '<div class="lp-sec">Gateway mismatch (old static config)</div>';
+        html += '<div class="cam__tray__sec">Gateway mismatch (old static config)</div>';
         for (const g of data.gateway_mismatches.slice(0, 8)) {
           html +=
-            `<div class="lp-row">` +
+            `<div class="cam__tray__row cam__tray__row--lost">` +
             `<span class="ip">${esc(g.ip)}</span>` +
             `<span class="badge gw">GW MISMATCH</span>` +
             (g.warn_reset ? `<span class="warn-reset"> &#9888; do not reset</span>` : '') +
@@ -484,10 +445,10 @@
 
       // Subnet mismatches
       if (data.mismatches && data.mismatches.length) {
-        html += '<div class="lp-sec">Subnet mismatch (one at a time)</div>';
+        html += '<div class="cam__tray__sec">Subnet mismatch (one at a time)</div>';
         for (const m of data.mismatches.slice(0, 8)) {
           html +=
-            `<div class="lp-row">` +
+            `<div class="cam__tray__row cam__tray__row--lost">` +
             `<span class="ip">${esc(m.ip)}</span>` +
             `<span class="badge">${esc(m.status || 'observed')}</span>` +
             (m.warn_reset ? `<span class="warn-reset"> &#9888; do not reset</span>` : '') +
@@ -501,11 +462,11 @@
 
       // Orphans
       if (data.orphans && data.orphans.length) {
-        html += '<div class="lp-sec">Orphans (switch/NVR/DHCP/passive only)</div>';
+        html += '<div class="cam__tray__sec">Orphans (switch/NVR/DHCP/passive only)</div>';
         for (const o of data.orphans.slice(0, 10)) {
           const label = o.ip || o.mac || 'unknown';
           html +=
-            `<div class="lp-row">` +
+            `<div class="cam__tray__row cam__tray__row--lost">` +
             `<span class="ip">${esc(label)}</span>` +
             `<span class="badge orphan">${esc(o.status || 'orphan')}</span>` +
             `<div class="detail">${esc(o.reason || '')}</div>` +
@@ -515,7 +476,7 @@
         }
       }
 
-      body.innerHTML = html || '<div class="lp-empty">No lost devices detected.</div>';
+      body.innerHTML = html || '<div class="cam__tray__empty">No lost devices detected.</div>';
     } catch(_) {}
   }
 
@@ -749,6 +710,21 @@
     updateStats();
   }
 
+  // Coalesce rapid device updates (SSE bursts during a sweep) into one render
+  // every 250 ms so the DOM does not get repainted dozens of times/sec.
+  let _renderPending = false;
+  let _renderTimer = null;
+  function scheduleRender() {
+    if (_renderPending) return;
+    _renderPending = true;
+    if (_renderTimer) clearTimeout(_renderTimer);
+    _renderTimer = setTimeout(() => {
+      _renderPending = false;
+      _renderTimer = null;
+      syncDisplayedDevices();
+    }, 250);
+  }
+
   function renderInventoryMode() {
     if (!inventoryToggle) return;
     inventoryToggle.textContent = inventoryMode === 'persisted' ? 'Persisted View' : 'Live View';
@@ -774,8 +750,23 @@
   }
 
   // ─── SSE ────────────────────────────────────────────────────────────
+  // SSE reconnect control — avoid tight reconnect loops that make the UI flash.
+  let _sseReconnectDelay = 1000;
+  let _sseFailures = 0;
+  const _sseMaxDelay = 30000;
+  const _sseMaxFailures = 20;
+  let _sseReconnectTimer = null;
+
   async function connectSSE() {
-    if (eventSource) eventSource.close();
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    if (_sseFailures >= _sseMaxFailures) {
+      addActivityEvent('error', 'Live updates disconnected — too many retry failures');
+      return;
+    }
+
     let eventsUrl = '/api/events';
     if (window.electronAPI && window.electronAPI.getBackendSecrets) {
       const secrets = await window.electronAPI.getBackendSecrets();
@@ -783,17 +774,29 @@
       url.searchParams.set('backend_token', secrets.token || '');
       eventsUrl = url.toString();
     }
-    eventSource = new EventSource(eventsUrl);
 
-    eventSource.addEventListener('message', (e) => {
+    const es = new EventSource(eventsUrl);
+    eventSource = es;
+
+    es.addEventListener('open', () => {
+      _sseFailures = 0;
+      _sseReconnectDelay = 1000;
+    });
+
+    es.addEventListener('message', (e) => {
       try {
         const msg = JSON.parse(e.data);
         handleEvent(msg);
       } catch(err) { /* heartbeat or parse error */ }
     });
 
-    eventSource.onerror = () => {
-      setTimeout(connectSSE, 3000);
+    es.onerror = () => {
+      es.close();
+      _sseFailures++;
+      const delay = Math.min(_sseReconnectDelay * 2, _sseMaxDelay);
+      _sseReconnectDelay = delay;
+      if (_sseReconnectTimer) clearTimeout(_sseReconnectTimer);
+      _sseReconnectTimer = setTimeout(connectSSE, delay);
     };
   }
 
@@ -804,13 +807,13 @@
       case 'device_found':
         upsertDevice(data);
         addActivityEvent('found', `Found ${data.ip} — ${data.vendor}`);
-        syncDisplayedDevices();
+        scheduleRender();
         if (inventoryMode === 'persisted' && currentSiteId) loadPersistedInventory();
         break;
 
       case 'device_updated':
         upsertDevice(data);
-        syncDisplayedDevices();
+        scheduleRender();
         if (inventoryMode === 'persisted' && currentSiteId) loadPersistedInventory();
         break;
 
@@ -842,7 +845,7 @@
 
       case 'devices_cleared':
         liveDevices = [];
-        syncDisplayedDevices();
+        scheduleRender();
         addActivityEvent('found', 'Device list cleared');
         break;
 
@@ -1056,8 +1059,10 @@
         setScanning(false);
       }
     } catch(e) {
-      addActivityEvent('error', 'Network error starting scan');
-      setScanning(false);
+      addActivityEvent('error', e.message || 'Network error starting scan');
+      // A 409 "already running" or transient network hiccup should not flip
+      // the spinner off if the backend is still scanning. Poll status to sync.
+      pollScanStatus().catch(() => setScanning(false));
     }
   }
 
@@ -1926,7 +1931,10 @@
       if (credsResp.ok) {
         const creds = await credsResp.json();
         savedUser = creds.username || 'admin';
-        savedPass = creds.password || '';
+        // Backend intentionally never returns the plaintext password.  We keep
+        // a renderer-memory cache for the current session so clicking
+        // "Save & Load" actually applies the credentials the operator just typed.
+        savedPass = viewerPasswordCache[ip] || '';
       }
     } catch(e) { /* use defaults */ }
 
@@ -1983,6 +1991,9 @@
   window._saveAndLoad = async function(ip) {
     const user = (document.getElementById('viewer-user') || {}).value || 'admin';
     const pass = (document.getElementById('viewer-pass') || {}).value || '';
+    // Keep the password in renderer memory for this session so reopening the
+    // viewer does not force the operator to re-type it every time.
+    viewerPasswordCache[ip] = pass;
     try {
       await apiFetch(`/api/devices/${encodeURIComponent(ip)}/credentials`, {
         method: 'POST',
@@ -2037,7 +2048,7 @@
     const user = (document.getElementById('viewer-user') || {}).value || 'admin';
     const pass = (document.getElementById('viewer-pass') || {}).value || '';
     try {
-      const resp = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/onvif-info?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`);
+      const resp = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/onvif-info?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}&timeout=6`);
       const info = await resp.json();
       if (info.error) {
         addActivityEvent('error', `ONVIF info failed for ${ip}: ${info.error}`);

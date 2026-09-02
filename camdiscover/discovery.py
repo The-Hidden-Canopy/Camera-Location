@@ -626,6 +626,7 @@ def query_onvif_device_audit(
     onvif_url: str = "",
     username: str = "admin",
     password: str = "",
+    timeout: float = 5.0,
 ) -> OnvifDeviceAudit:
     """Run an ODM-style ONVIF capability audit against a discovered device."""
     if not onvif_url:
@@ -635,7 +636,7 @@ def query_onvif_device_audit(
 
     def _call(check_name: str, url: str, body_xml: str) -> str:
         try:
-            response = _onvif_soap(url, username, password, body_xml)
+            response = _onvif_soap(url, username, password, body_xml, timeout=timeout)
             audit.checks[check_name] = True
             return response
         except Exception as exc:
@@ -770,11 +771,12 @@ def query_onvif_device_audit(
 
 
 def query_onvif_device_info(ip: str, onvif_url: str = "",
-                             username: str = "admin", password: str = "") -> OnvifDeviceInfo:
+                             username: str = "admin", password: str = "",
+                             timeout: float = 5.0) -> OnvifDeviceInfo:
     """
     Backward-compatible summary wrapper over the richer ONVIF capability audit.
     """
-    audit = query_onvif_device_audit(ip, onvif_url, username, password)
+    audit = query_onvif_device_audit(ip, onvif_url, username, password, timeout=timeout)
     return OnvifDeviceInfo(
         manufacturer=audit.manufacturer,
         model=audit.model,

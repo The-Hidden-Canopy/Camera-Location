@@ -163,7 +163,7 @@ def get_interfaces() -> List[NetworkInterface]:
     try:
         result = subprocess.run(
             ["ipconfig", "/all"],
-            capture_output=True, text=True, timeout=10, shell=True
+            capture_output=True, text=True, timeout=10
         )
         current = None
         last_ip = None
@@ -178,9 +178,10 @@ def get_interfaces() -> List[NetworkInterface]:
             if current is None:
                 continue
 
-            # Collect every IPv4 address (there can be many on multi-homed adapters)
+            # Collect every IPv4 address (there can be many on multi-homed adapters).
+            # Skip "Autoconfiguration IPv4 Address" so APIPA never becomes primary.
             ip_m = re.match(r"\s+IPv4 Address[.\s]+:\s+(\d+\.\d+\.\d+\.\d+)", line)
-            if ip_m:
+            if ip_m and "autoconfiguration" not in line.lower():
                 last_ip = ip_m.group(1).strip().rstrip("(Preferred)")
                 iface_data[current]["ips"].append(last_ip)
                 continue
@@ -190,9 +191,17 @@ def get_interfaces() -> List[NetworkInterface]:
                 iface_data[current]["masks"].append(mask_m.group(1))
                 continue
 
-            mac_m = re.match(r"\s+Physical Address[.\s]+:\s+([0-9A-Fa-f-]{17})", line)
+            # Accept Windows hyphen, colon, or bare 12-hex MAC formats.
+            mac_m = re.match(r"\s+Physical Address[.\s]+:\s+([0-9A-Fa-f:-]{17}|[0-9A-Fa-f]{12})", line)
             if mac_m and not iface_data[current]["mac"]:
-                iface_data[current]["mac"] = mac_m.group(1).replace("-", ":").lower()
+                raw = mac_m.group(1).lower()
+                if len(raw) == 12:
+                    mac = ":".join(raw[i:i + 2] for i in range(0, 12, 2))
+                else:
+                    mac = raw.replace("-", ":")
+                # Ignore broadcast / invalid placeholder MACs.
+                if mac not in ("ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00"):
+                    iface_data[current]["mac"] = mac
                 continue
 
             desc_m = re.match(r"\s+Description[.\s]+:\s+(.+)", line)
@@ -200,11 +209,34 @@ def get_interfaces() -> List[NetworkInterface]:
                 iface_data[current]["description"] = desc_m.group(1).strip()
                 continue
 
-            gw_m = re.match(r"\s+Default Gateway[.\s]+:\s+(\d+\.\d+\.\d+\.\d+)", line)
+            gw_m = re.match(r"\s+Default Gateway[.\s]+:\s*(.+)", line)
             if gw_m and not iface_data[current]["gateway"]:
-                iface_data[current]["gateway"] = gw_m.group(1)
+                # ipconfig may list IPv6 first; grab the first IPv4 address.
+                for token in gw_m.group(1).split():
+                    if re.match(r"\d+\.\d+\.\d+\.\d+", token):
+                        iface_data[current]["gateway"] = token
+                        break
                 continue
 
+    except Exception:
+        pass
+
+    # Fallback gateway lookup from IPv4 routing table when ipconfig omits it
+    # (common when the adapter has only an IPv6 gateway listed).
+    route_gateways: dict = {}
+    try:
+        route_result = subprocess.run(
+            ["route", "print", "-4"],
+            capture_output=True, text=True, timeout=10
+        )
+        for line in route_result.stdout.splitlines():
+            # 0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.107     35
+            m = re.match(
+                r"\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)",
+                line,
+            )
+            if m:
+                route_gateways[m.group(2)] = m.group(1)
     except Exception:
         pass
 
@@ -235,6 +267,7 @@ def get_interfaces() -> List[NetworkInterface]:
         except Exception:
             prefix_len = 24
 
+        gateway = data["gateway"] or route_gateways.get(primary_ip, "")
         interfaces.append(NetworkInterface(
             name=name,
             ip=primary_ip,
@@ -242,7 +275,7 @@ def get_interfaces() -> List[NetworkInterface]:
             cidr=f"{primary_ip}/{prefix_len}",
             mac=data["mac"],
             iface_type=iface_type,
-            gateway=data["gateway"],
+            gateway=gateway,
             subnet=subnet,
             all_ips=ips,
             all_netmasks=masks,
@@ -290,11 +323,16 @@ def get_arp_table() -> List[dict]:
             #   192.168.1.195         9c-8e-cd-3f-e3-98     dynamic
             #   192.168.1.1           74-24-9f-5d-f0-aa     dynamic   0x15
             m = re.match(
-                r"\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f-]+)\s+(\S+)(?:\s+(\S+))?",
+                r"\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F.-]+)\s+(\S+)(?:\s+(\S+))?",
                 line, re.IGNORECASE
             )
             if m:
-                mac = m.group(2).replace("-", ":").lower()
+                raw_mac = m.group(2).lower()
+                if "." in raw_mac:
+                    # Cisco dotted notation: 1234.5678.9abc
+                    mac = ":".join(raw_mac.replace(".", "")[i:i + 2] for i in range(0, 12, 2))
+                else:
+                    mac = raw_mac.replace("-", ":")
                 if mac == "ff:ff:ff:ff:ff:ff" or mac == "00:00:00:00:00:00":
                     continue
                 entries.append({
@@ -456,7 +494,7 @@ def get_routes() -> List[dict]:
     try:
         result = subprocess.run(
             ["route", "print", "-4"],
-            capture_output=True, text=True, timeout=10, shell=True
+            capture_output=True, text=True, timeout=10
         )
         for line in result.stdout.splitlines():
             # Match: 0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.148    35

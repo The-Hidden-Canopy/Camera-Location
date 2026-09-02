@@ -184,7 +184,7 @@ def test_onvif_info_route_returns_richer_audit_payload(monkeypatch):
     try:
         app = create_app(db_path=str(temp_dir / "onvif.db"))
 
-        def fake_audit(ip: str, onvif_url: str = "", username: str = "admin", password: str = "") -> OnvifDeviceAudit:
+        def fake_audit(ip: str, onvif_url: str = "", username: str = "admin", password: str = "", timeout: float = 5.0) -> OnvifDeviceAudit:
             return OnvifDeviceAudit(
                 manufacturer="Hikvision",
                 model="DS-2CD2347G2-LU",

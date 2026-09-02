@@ -293,6 +293,33 @@
       </main>
     </div>
 
+    <!-- ═══ Bottom Tray (Triage + Lost/Mismatched) ═══ -->
+    <div class="cam__tray cam__tray--collapsed" id="bottom-tray">
+      <div class="cam__tray__header" id="bottom-tray-header">
+        <div class="cam__tray__tabs">
+          <button class="cam__tray__tab cam__tray__tab--active" data-tray-tab="triage">
+            <span class="cam__tray__badge" id="tray-badge-triage">0</span> Triage Engine
+          </button>
+          <button class="cam__tray__tab" data-tray-tab="lost">
+            <span class="cam__tray__badge" id="tray-badge-lost">0</span> Lost / Mismatched
+          </button>
+        </div>
+        <div class="cam__tray__actions">
+          <button class="cam__tray__btn" id="tray-ingest" title="Ingest out-of-band evidence">+ Ingest</button>
+          <button class="cam__tray__btn" id="tray-refresh" title="Refresh now">&#8635;</button>
+          <button class="cam__tray__toggle" id="tray-toggle" title="Expand/collapse tray">&#9650;</button>
+        </div>
+      </div>
+      <div class="cam__tray__body" id="bottom-tray-body">
+        <div class="cam__tray__panel cam__tray__panel--active" id="tray-panel-triage">
+          <div class="cam__tray__empty">Loading triage state…</div>
+        </div>
+        <div class="cam__tray__panel" id="tray-panel-lost">
+          <div class="cam__tray__empty">Loading lost devices…</div>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ Activity Bar ═══ -->
     <footer class="cam__activity-bar">
       <span class="cam__activity-label">LIVE</span>

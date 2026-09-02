@@ -79,6 +79,12 @@ class DiscoveryOrchestrator:
         # Passive DPI evidence collector — runs alongside every scan mode
         self._dpi: Optional[DPICollector] = None
 
+        # Short-lived ARP cache so _scan_and_fingerprint can resolve MACs
+        # without re-parsing the Windows ARP table for every single IP.
+        self._arp_cache: Dict[str, str] = {}
+        self._arp_cache_ts = 0.0
+        self._arp_cache_ttl = 1.0
+
         # Serialises netsh add/remove calls so Windows never gets two
         # interface-modification commands at the same time
         self._netsh_lock = threading.Lock()
@@ -180,8 +186,25 @@ class DiscoveryOrchestrator:
 
     @staticmethod
     def _normalise_mac(mac: str) -> str:
-        """Canonical lowercase colon-separated MAC for index keys."""
-        return mac.lower().replace("-", ":").strip() if mac else ""
+        """Canonical lowercase colon-separated MAC for index keys.
+
+        Accepts the common formats returned by OS tools: colon, hyphen,
+        bare 12-hex, and Cisco dotted (1234.5678.9abc).
+        """
+        if not mac:
+            return ""
+        mac = mac.strip().lower()
+        if "." in mac:
+            # Cisco dotted notation: 1234.5678.9abc -> 01:23:45:67:89:ab
+            flat = mac.replace(".", "")
+            if len(flat) == 12:
+                return ":".join(flat[i:i + 2] for i in range(0, 12, 2))
+        mac = mac.replace("-", ":")
+        if ":" not in mac:
+            if len(mac) == 12:
+                return ":".join(mac[i:i + 2] for i in range(0, 12, 2))
+            return mac
+        return mac
 
     def _register_device(self, device: DiscoveredDevice):
         """Add or refresh both secondary indexes for a device."""
@@ -190,6 +213,30 @@ class DiscoveryOrchestrator:
             nm = self._normalise_mac(device.mac)
             if nm:
                 self._devices_by_mac[nm] = device.device_id
+
+    def _resolve_mac(self, ip: str) -> str:
+        """Return the MAC address for *ip* from the ARP table.
+
+        Uses a short-lived in-memory cache so a sweep of 254 hosts does not
+        shell out to ``arp -a`` 254 times.
+        """
+        dev = self.devices.get(ip)
+        if dev and dev.mac:
+            return dev.mac
+        now = time.time()
+        if now - self._arp_cache_ts < self._arp_cache_ttl and ip in self._arp_cache:
+            return self._arp_cache[ip]
+        try:
+            entries = get_arp_table()
+            self._arp_cache = {
+                e["ip"]: e["mac"]
+                for e in entries
+                if e.get("mac") and e["mac"] not in ("ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00")
+            }
+            self._arp_cache_ts = now
+        except Exception:
+            pass
+        return self._arp_cache.get(ip, "")
 
     def _get_or_create(self, ip: str, method: str = "",
                        mac: str = "") -> DiscoveredDevice:
@@ -525,6 +572,32 @@ class DiscoveryOrchestrator:
             self._camera_validation_q[ip] = CameraValidationEntry(
                 ip=ip, reason=reason, priority=priority)
 
+    def requeue_camera_validation(self, ip: str) -> bool:
+        """Reset a camera validation entry so new credentials take effect.
+
+        Called when the operator updates credentials for a device.  The next
+        time P1-P4 are idle the device will be re-validated with the new
+        credentials instead of keeping a stale fail/unchecked result.
+        """
+        with self._triage_lock:
+            entry = self._camera_validation_q.get(ip)
+            if entry:
+                entry.status = "pending"
+                entry.attempts = 0
+                entry.onvif_ok = False
+                entry.rtsp_ok = False
+                entry.http_ok = False
+                entry.nvr_match = False
+                entry.stream_ok = False
+                return True
+            # Not previously queued — add it now if the device looks like a camera.
+            dev = self.devices.get(ip)
+            if dev and dev.device_class == "camera":
+                self._camera_validation_q[ip] = CameraValidationEntry(
+                    ip=ip, reason="credentials updated", priority=20)
+                return True
+        return False
+
     # ── Gap 1: NVR channel list query ───────────────────────────────────
     #
     # Query known NVRs (Hikvision ISAPI / Dahua HTTP CGI) for their camera
@@ -615,7 +688,7 @@ class DiscoveryOrchestrator:
                     _cred = self.credentials.get(ip, {})
                     _user = _cred.get("username", "admin")
                     _pass = _cred.get("password", "")
-                    info = query_onvif_device_info(ip, url, _user, _pass)
+                    info = query_onvif_device_info(ip, url, _user, _pass, timeout=2.0)
                     if not info.error:
                         entry.onvif_ok = True
                         if info.model and not dev.model:
@@ -818,6 +891,11 @@ class DiscoveryOrchestrator:
         # Passive dwell: how long to keep cycling after active work drains so
         # late ONVIF/SADP/ARP announcements still get triaged.
         dwell = {"listen": 12, "dhcp-trap": 30}.get(mode, 6)
+        # Hard ceiling so a passive listen mode or noisy subnet can never keep
+        # the UI "loading" indefinitely. Operator can restart anytime.
+        max_duration = {"listen": 300, "dhcp-trap": 600, "sweep": 1800,
+                        "fingerprint": 3600, "dpi": 3600, "report": 1}.get(mode, 600)
+        started_at = time.time()
         idle_started: Optional[float] = None
 
         last_arp = 0.0
@@ -832,6 +910,11 @@ class DiscoveryOrchestrator:
                     # ARP table refresh is a subprocess — throttle to every 4s
                     # so a 254-host walk doesn't spawn 254 `arp -a` calls.
                     now = time.time()
+                    if now - started_at >= max_duration:
+                        self._set_task(
+                            f"Scan reached maximum duration ({max_duration}s) — stopping cleanly",
+                            "triage")
+                        break
                     if now - last_arp >= 4.0:
                         last_arp = now
                         self._collect_arp_entries()
@@ -2112,15 +2195,18 @@ class DiscoveryOrchestrator:
                                       "TCP 554 open with RTSP-like response",
                                       "active_rtsp", raw=rtsp_result.banner)
 
-        # ONVIF URL
+        # ONVIF URL candidate — port 8899 is suggestive but not proof.
         if device.onvif_status == "not-checked" and 8899 in device.open_ports:
-            device.onvif_status = "found"
             device.onvif_url = f"http://{ip}:8899/onvif/device_service"
             if "ONVIF" not in device.protocols:
                 device.protocols.append("ONVIF")
-            self._record_evidence(device, "onvif_device_service_url",
-                                  f"ONVIF device_service: {device.onvif_url}",
-                                  "active_onvif", raw=device.onvif_url)
+
+        # Resolve MAC from ARP before fingerprinting so vendor/OUI lookups work.
+        if not device.mac:
+            resolved_mac = self._resolve_mac(ip)
+            if resolved_mac:
+                device.mac = resolved_mac
+                self._register_device(device)
 
         # Construct web URL
         if not device.web_url:
@@ -2163,7 +2249,7 @@ class DiscoveryOrchestrator:
                                       "fingerprint", weight=bridge_weight)
 
         # ONVIF device info (ODM-style: get real model/firmware/stream URIs)
-        if device.onvif_status == "found" and device.onvif_url:
+        if device.onvif_url:
             try:
                 # Gap 7+9: prefer saved per-device creds, fall back to zone
                 # credential_profile, then anonymous.
@@ -2180,7 +2266,9 @@ class DiscoveryOrchestrator:
                         _cred = self.credentials.get(_profile, {})
                 _user = _cred.get("username", "admin")
                 _pass = _cred.get("password", "")
-                info = query_onvif_device_info(ip, device.onvif_url, _user, _pass)
+                # Short timeout: non-ONVIF hosts that happen to have 8899 open
+                # would otherwise block the sequential sweep for seconds.
+                info = query_onvif_device_info(ip, device.onvif_url, _user, _pass, timeout=2.0)
                 if not info.error:
                     self._record_evidence(device, "onvif_port_responding",
                                           "ONVIF endpoint replied to SOAP",
@@ -2548,6 +2636,16 @@ class DiscoveryOrchestrator:
                           "RTSP", "Passive-DPI", "seed", "seed_nvr"}
         if strong_methods.intersection(device.discovery_methods):
             return False
+        # Keep hosts with a known MAC vendor (workstations, printers, phones,
+        # infrastructure) so the inventory is useful beyond cameras.
+        if device.mac and lookup_vendor(device.mac) != "Unknown":
+            return False
+        # Keep hosts that expose common IT services — they are real endpoints
+        # even if they are not cameras.
+        if device.open_ports and ({22, 23, 25, 53, 135, 139, 445,
+                                   515, 631, 3389, 5900, 9100, 8000}
+                                  & set(device.open_ports)):
+            return False
         return True
 
     def _maybe_add_mac_vendor_evidence(self, device: DiscoveredDevice):
@@ -2602,6 +2700,8 @@ class DiscoveryOrchestrator:
         if not local_subnets or device.subnet in local_subnets:
             return
 
+        iface_ip = self.selected_interface.ip if self.selected_interface else ""
+        iface_subnet = ip_to_subnet(iface_ip) if iface_ip else ""
         l2_methods = {"ONVIF", "SSDP", "SADP", "Dahua-UDP", "Passive-DPI", "ARP", "Sniff"}
         if any(method in l2_methods for method in device.discovery_methods):
             device.subnet_mismatch = (
@@ -2729,6 +2829,13 @@ class DiscoveryOrchestrator:
     def add_subnet_zone(self, zone: SubnetZone) -> bool:
         """Add a subnet zone and make it reachable."""
         self.subnet_zones[zone.subnet] = zone
+
+        # Ensure we have a selected interface; auto-pick ethernet or first usable.
+        if not self.selected_interface:
+            ifaces = self.select_interface()
+            if ifaces:
+                best = next((i for i in ifaces if i.iface_type == "ethernet"), ifaces[0])
+                self.set_interface(best)
 
         # Try to make subnet reachable based on method
         if zone.method == "route" and zone.gateway:

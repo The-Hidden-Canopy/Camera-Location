@@ -760,3 +760,131 @@ body.is-electron .cam {
   0%, 100% { background: transparent; }
   50%       { background: rgba(234,179,8,.08); }
 }
+
+
+/* ─── Bottom tray (Triage + Lost/Mismatched) ───────────────────────────── */
+.cam__tray {
+  flex-shrink: 0;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-mid);
+  display: flex;
+  flex-direction: column;
+  z-index: 70;
+  transition: height .18s ease;
+}
+.cam__tray--collapsed .cam__tray__body {
+  display: none;
+}
+.cam__tray--collapsed .cam__tray__toggle {
+  transform: rotate(180deg);
+}
+.cam__tray__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 10px;
+  background: var(--bg-panel-alt);
+  border-bottom: 1px solid var(--border-mid);
+}
+.cam__tray__tabs {
+  display: flex;
+  gap: 4px;
+}
+.cam__tray__tab {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font: 10px/1 var(--font-mono);
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.cam__tray__tab:hover { color: var(--text-secondary); }
+.cam__tray__tab--active { background: var(--bg-hover); color: var(--text-primary); }
+.cam__tray__badge {
+  display: inline-block;
+  min-width: 14px;
+  padding: 0 4px;
+  text-align: center;
+  background: var(--border-bright);
+  color: var(--text-primary);
+  border-radius: 8px;
+  font-size: 9px;
+}
+.cam__tray__tab--active .cam__tray__badge { background: var(--accent-cyan); color: #000; }
+.cam__tray__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cam__tray__btn,
+.cam__tray__toggle {
+  background: var(--bg-input);
+  border: 1px solid var(--border-bright);
+  color: var(--text-secondary);
+  font: 10px/1 var(--font-mono);
+  padding: 1px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.cam__tray__btn:hover,
+.cam__tray__toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+.cam__tray__toggle { transition: transform .18s ease; }
+.cam__tray__body {
+  height: 240px;
+  overflow: hidden;
+  display: flex;
+}
+.cam__tray__panel {
+  display: none;
+  flex: 1;
+  overflow: auto;
+  padding: 8px 10px;
+  font: 11px/1.4 var(--font-mono);
+  color: var(--text-secondary);
+}
+.cam__tray__panel--active { display: block; }
+.cam__tray__empty { color: var(--text-muted); padding: 6px 0; }
+
+/* Shared row styles inside tray */
+.cam__tray__sec {
+  margin: 8px 0 3px;
+  color: var(--warn);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: .06em;
+}
+.cam__tray__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border-dim);
+}
+.cam__tray__row span:last-child { color: var(--text-muted); white-space: nowrap; }
+.cam__tray__task { color: var(--accent-bright); margin-bottom: 6px; word-break: break-word; }
+
+/* Lost panel specific */
+.cam__tray__row--lost { display: block; padding: 4px 0; }
+.cam__tray__row--lost .ip { color: var(--info-blue); font-weight: bold; }
+.cam__tray__row--lost .badge {
+  display: inline-block;
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: var(--error-dim);
+  color: var(--error);
+  margin-left: 4px;
+}
+.cam__tray__row--lost .badge.gw { background: var(--warn-dim); color: var(--warn); }
+.cam__tray__row--lost .badge.orphan { background: #0d2040; color: var(--info-blue); }
+.cam__tray__row--lost .detail { color: var(--text-muted); font-size: 10px; margin-top: 2px; }
+.cam__tray__row--lost .next { color: var(--accent-green); font-size: 10px; }
+.cam__tray__row--lost .warn-reset { color: var(--error); font-weight: bold; font-size: 10px; }
