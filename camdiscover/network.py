@@ -307,6 +307,7 @@ def classify_interface(name: str, description: str = "") -> str:
 
 
 _arp_lock = threading.Lock()
+_neighbor_lock = threading.Lock()
 
 def get_arp_table() -> List[dict]:
     """Parse Windows ARP table."""
@@ -345,6 +346,43 @@ def get_arp_table() -> List[dict]:
         pass
     finally:
         _arp_lock.release()
+    return entries
+
+
+def get_neighbor_table() -> List[dict]:
+    """Parse Windows IPv6 neighbor observations without active probing."""
+    entries = []
+    if not _neighbor_lock.acquire(timeout=5):
+        return entries
+    try:
+        result = subprocess.run(
+            ["netsh", "interface", "ipv6", "show", "neighbors"],
+            capture_output=True, text=True, timeout=8,
+        )
+        for line in result.stdout.splitlines():
+            # Windows may prefix the address with interface index and metric;
+            # locate the address/MAC tokens rather than assuming a column 0
+            # layout.
+            address_match = re.search(r"(?<![0-9A-Fa-f:])([0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){2,7})(?![0-9A-Fa-f:])", line)
+            mac_match = re.search(r"\b(?:[0-9A-Fa-f]{2}[-:.]){5}[0-9A-Fa-f]{2}\b|\b[0-9A-Fa-f]{12}\b", line)
+            if not address_match or not mac_match:
+                continue
+            try:
+                address = ipaddress.IPv6Address(address_match.group(1))
+            except ValueError:
+                continue
+            if address.is_multicast or address.is_unspecified:
+                continue
+            raw_mac = mac_match.group(0).lower()
+            mac = ":".join(raw_mac.replace("-", "").replace(".", "")[index:index + 2] for index in range(0, 12, 2))
+            if mac in {"ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00"}:
+                continue
+            state = line[mac_match.end():].strip().split(maxsplit=1)
+            entries.append({"ip": str(address), "mac": mac, "type": state[0] if state else "unknown", "iface": ""})
+    except Exception:
+        pass
+    finally:
+        _neighbor_lock.release()
     return entries
 
 

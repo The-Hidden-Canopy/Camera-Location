@@ -15,6 +15,7 @@ Usage:
     camera-discover subnets --add 192.168.88.0/24 # Add a subnet zone
     camera-discover dpi <ip>                      # Run DPI validation on a device
     camera-discover capture-pos                   # Show current capture position
+    camera-discover map --db-path DB --site-id SITE --scope-id SCOPE
 """
 
 from __future__ import annotations
@@ -64,6 +65,16 @@ def main():
     # ports command
     subparsers.add_parser("ports", help="Show camera port reference")
 
+    map_parser = subparsers.add_parser("map", help="Run bounded corporate network mapping inside an approved scope")
+    map_parser.add_argument("--db-path", required=True, help="SQLite database path")
+    map_parser.add_argument("--site-id", required=True)
+    map_parser.add_argument("--scope-id", required=True, help="Persisted approved scope grant; raw CIDRs are not accepted")
+    map_parser.add_argument("--collector-id", default="local-cli")
+    map_parser.add_argument("--ports", default="22,80,443", help="Comma-separated allowlisted TCP ports")
+    map_parser.add_argument("--min-interval-ms", type=int, default=100, help="Minimum delay between host probes")
+    map_parser.add_argument("--max-hosts", type=int, default=4096, help="Maximum observed hosts processed in one session")
+    map_parser.add_argument("--resume-cursor", default="", help="Resume after the last processed IP recorded by an interrupted session")
+
     # web command
     web_parser = subparsers.add_parser("web", help="Launch web dashboard UI")
     web_parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
@@ -99,6 +110,8 @@ def main():
         show_interfaces()
     elif args.command == "ports":
         show_ports()
+    elif args.command == "map":
+        run_network_map(args)
     elif args.command == "web":
         run_web(args)
     elif args.command == "subnets":
@@ -133,6 +146,7 @@ def run_scan(args):
             for i in interfaces:
                 print(f"  {i.name} ({i.ip}) — {i.iface_type}")
             sys.exit(1)
+
     else:
         best = next((i for i in interfaces if i.iface_type == "ethernet"), interfaces[0])
         orchestrator.set_interface(best)
@@ -141,7 +155,6 @@ def run_scan(args):
     subnets = args.subnet.split(",") if args.subnet else None
 
     if not args.no_dashboard:
-        # Try TUI dashboard
         try:
             from .dashboard import Dashboard
             dashboard = Dashboard(orchestrator)
@@ -155,8 +168,115 @@ def run_scan(args):
         except Exception as e:
             print_info(f"Dashboard unavailable ({e}), falling back to CLI mode.")
 
-    # CLI mode
     run_cli_mode(orchestrator, mode, subnets, args.output)
+
+
+def run_network_map(args):
+    """Map only hosts already observed locally, within a persisted grant."""
+    from .persistence.db import Database
+    from .network import get_arp_table, get_neighbor_table, ping_host
+    from .discovery import scan_ports
+    from .services.network_mapping import DEFAULT_ALLOWLISTED_PORTS, NetworkMappingService
+
+    database = Database(args.db_path)
+    database.migrate()
+    session = None
+    current_cursor = None
+    errors = []
+    try:
+        if not isinstance(args.ports, str):
+            raise ValueError("ports must be a comma-separated string")
+        ports = [int(p.strip()) for p in args.ports.split(",") if p.strip()]
+        if not ports:
+            raise ValueError("at least one TCP port is required")
+        if len(set(ports)) != len(ports) or len(ports) > 12:
+            raise ValueError("at most 12 unique TCP ports may be probed per host")
+        if any(port not in DEFAULT_ALLOWLISTED_PORTS for port in ports):
+            raise ValueError(f"ports must be allowlisted: {', '.join(map(str, DEFAULT_ALLOWLISTED_PORTS))}")
+        if not isinstance(args.min_interval_ms, int) or args.min_interval_ms < 0:
+            raise ValueError("min_interval_ms must be zero or greater")
+        if not isinstance(args.max_hosts, int) or not 1 <= args.max_hosts <= 4096:
+            raise ValueError("max_hosts must be between 1 and 4096")
+        svc = NetworkMappingService(database)
+        session = svc.start_session(
+            scope_id=args.scope_id, collector_id=args.collector_id,
+            methods=["passive_arp", "bounded_icmp", "bounded_tcp"],
+            resume_cursor=args.resume_cursor or None,
+        )
+        observed_by_ip = {}
+        for row in get_arp_table() + get_neighbor_table():
+            ip = row.get("ip") or row.get("address")
+            if ip and ip not in observed_by_ip:
+                observed_by_ip[ip] = row
+        observed = list(observed_by_ip.values())
+        count = 0
+        resumed = not bool(args.resume_cursor)
+        if not observed:
+            errors.append("passive ARP and IPv6 neighbor collectors returned no observations")
+        for row in observed:
+            ip = row.get("ip") or row.get("address")
+            if not ip:
+                continue
+            if not resumed:
+                if str(ip) == args.resume_cursor:
+                    resumed = True
+                continue
+            if count >= args.max_hosts:
+                errors.append("maximum host limit reached")
+                break
+            current_cursor = str(ip)
+            try:
+                # Reject before opening a socket.  A discovered ARP row is
+                # not permission to probe outside the approved CIDRs.
+                svc.validate_observation_target(scope_id=args.scope_id, site_id=args.site_id, address=ip)
+                icmp_reachable = ping_host(ip, timeout=750)
+                open_ports = scan_ports(ip, ports=ports, timeout=0.75)
+                svc.record_observation(scope_id=args.scope_id, site_id=args.site_id,
+                    asset_id=f"local:{row.get('mac') or ip}", ip=ip,
+                    mac=row.get("mac", ""), open_ports=open_ports,
+                    source="passive_plus_bounded_icmp_tcp", collector_id=args.collector_id,
+                    reachability="icmp_reachable" if icmp_reachable else "icmp_unreachable")
+                count += 1
+            except (ValueError, TypeError) as exc:
+                errors.append(f"{ip}: {exc}")
+                print_error(f"{ip}: {exc}")
+            if args.min_interval_ms:
+                time.sleep(args.min_interval_ms / 1000)
+        if not resumed and args.resume_cursor:
+            raise ValueError("resume_cursor was not found in the current passive observation")
+        if errors:
+            svc.finish_session(session.session_id, coverage_state="partial", failure_state="; ".join(errors)[:1000], resume_cursor=current_cursor)
+            print(f"Mapped {count} observed host(s) with partial coverage; no configuration changes were executed.")
+        else:
+            svc.finish_session(session.session_id, coverage_state="complete", resume_cursor=current_cursor)
+            print(f"Mapped {count} observed host(s); no configuration changes were executed.")
+        session = None
+    except KeyboardInterrupt:
+        if session:
+            try:
+                svc.finish_session(session.session_id, coverage_state="cancelled", failure_state="operator cancelled mapping", resume_cursor=current_cursor)
+            except Exception:
+                pass
+        print_warning("\nMapping cancelled; the last processed IP was recorded as the resume cursor.")
+    except (ValueError, KeyError, TypeError) as exc:
+        if session:
+            try:
+                svc.finish_session(session.session_id, coverage_state="partial", failure_state=str(exc), resume_cursor=current_cursor)
+            except Exception:
+                pass
+        print_error(str(exc))
+        sys.exit(2)
+    except Exception as exc:
+        if session:
+            try:
+                svc.finish_session(session.session_id, coverage_state="unavailable", failure_state=str(exc), resume_cursor=current_cursor)
+            except Exception:
+                pass
+        print_error(f"network mapping unavailable: {exc}")
+        sys.exit(2)
+    else:
+        if session:
+            svc.finish_session(session.session_id, coverage_state="complete")
 
 
 def run_cli_mode(

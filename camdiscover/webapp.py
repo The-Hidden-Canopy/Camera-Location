@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -15,8 +16,9 @@ import urllib.error
 
 from flask import Flask, render_template, jsonify, request, Response, send_file
 
-from .security import get_token_from_env, register_health, require_backend_token, set_token
+from .security import clear_token, get_token_from_env, register_health, require_backend_token, set_token
 from .api.routes import register_routes
+from .api.network_routes import register_network_routes
 from .api.change_routes import register_change_routes
 from .persistence.db import get_database
 from .services.discovery_service import DiscoveryService
@@ -101,6 +103,12 @@ def create_app(
     # Backend security channel
     if backend_token and backend_nonce:
         set_token(backend_token, backend_nonce)
+    else:
+        # App-factory instances must not inherit a prior Electron launch
+        # token. Environment-backed authentication remains available through
+        # get_token_from_env(), while a missing launch credential fails closed
+        # for the network-mapping surface.
+        clear_token()
 
     register_health(app)
 
@@ -114,8 +122,13 @@ def create_app(
         path = request.path
         if path == "/health" or not path.startswith("/api"):
             return None
+        network_mapping_path = path.startswith("/api/network-mapping")
+        if network_mapping_path and os.environ.get("CAM_NETWORK_MAPPING_DISABLED", "0").strip().lower() in {"1", "true", "yes"}:
+            return jsonify({"error": "network mapping is disabled by kill switch"}), 503
         expected = get_token_from_env()
         if not expected:
+            if network_mapping_path or os.environ.get("CORPORATE_COLLECTOR_MODE", "0").strip().lower() in {"1", "true", "yes"}:
+                return jsonify({"error": "corporate collector authentication is not configured"}), 503
             return None
         supplied = request.headers.get("X-Backend-Token") or request.args.get("backend_token")
         if not supplied:
@@ -1015,6 +1028,7 @@ def create_app(
     app.config["DISCOVERY_SERVICE"] = discovery_svc
 
     register_routes(app)
+    register_network_routes(app)
     register_change_routes(app)
 
     return app

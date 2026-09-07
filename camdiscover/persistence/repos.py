@@ -574,10 +574,25 @@ class ObservationRepo:
     def __init__(self, db: Database):
         self._db = db
 
-    def save(self, observation: Observation) -> Observation:
+    def save(self, observation: Observation, *, commit: bool = True) -> Observation:
         now = _now()
         observed = _coalesce_dt(observation.observed_at, now)
-        with self._db.conn:
+        if commit:
+            with self._db.conn:
+                self._db.conn.execute(
+                    """INSERT INTO observations(observation_id, site_id, endpoint_id, asset_id,
+                                                 kind, detail, source, sensor_id, interface,
+                                                 capture_position, visibility_limit, weight,
+                                                 raw, observed_at, session_id)
+                       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (observation.observation_id, observation.site_id,
+                     observation.endpoint_id, observation.asset_id, observation.kind,
+                     observation.detail, observation.source, observation.sensor_id,
+                     observation.interface, observation.capture_position,
+                     observation.visibility_limit, observation.weight, observation.raw,
+                     observed, observation.session_id)
+                )
+        else:
             self._db.conn.execute(
                 """INSERT INTO observations(observation_id, site_id, endpoint_id, asset_id,
                                              kind, detail, source, sensor_id, interface,
@@ -649,23 +664,74 @@ class TopologyRepo:
     def __init__(self, db: Database):
         self._db = db
 
-    def save(self, edge: TopologyEdge) -> TopologyEdge:
+    def save(self, edge: TopologyEdge, *, commit: bool = True) -> TopologyEdge:
         now = _now()
         since = _coalesce_dt(edge.since, now)
         until = edge.until.isoformat() if edge.until else None
-        with self._db.conn:
+        observed_at = _coalesce_dt(edge.observed_at, since)
+        validity_start = _coalesce_dt(edge.validity_start, observed_at)
+        validity_end = edge.validity_end.isoformat() if edge.validity_end else None
+        evidence_refs = _json(edge.evidence_refs)
+        if commit:
+            with self._db.conn:
+                self._db.conn.execute(
+                    """INSERT INTO topology_edges(edge_id, site_id, from_id, from_type,
+                                                    to_id, to_type, relation, detail,
+                                                    since, until, verified,
+                                                    source_observation_id, source_session_id,
+                                                    observed_at, validity_start, validity_end,
+                                                    confidence, evidence_state,
+                                                    contradiction_status, evidence_refs)
+                       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(edge_id) DO UPDATE SET
+                          relation=excluded.relation, detail=excluded.detail,
+                          since=excluded.since, until=excluded.until,
+                          verified=excluded.verified,
+                          source_observation_id=excluded.source_observation_id,
+                          source_session_id=excluded.source_session_id,
+                          observed_at=excluded.observed_at,
+                          validity_start=excluded.validity_start,
+                          validity_end=excluded.validity_end,
+                          confidence=excluded.confidence,
+                          evidence_state=excluded.evidence_state,
+                          contradiction_status=excluded.contradiction_status,
+                          evidence_refs=excluded.evidence_refs""",
+                    (edge.edge_id, edge.site_id, edge.from_id, edge.from_type,
+                     edge.to_id, edge.to_type, edge.relation, edge.detail,
+                     since, until, int(edge.verified), edge.source_observation_id,
+                     edge.source_session_id, observed_at, validity_start, validity_end,
+                     edge.confidence, edge.evidence_state, edge.contradiction_status,
+                     evidence_refs)
+                )
+        else:
             self._db.conn.execute(
                 """INSERT INTO topology_edges(edge_id, site_id, from_id, from_type,
                                                 to_id, to_type, relation, detail,
-                                                since, until, verified)
-                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                                since, until, verified,
+                                                source_observation_id, source_session_id,
+                                                observed_at, validity_start, validity_end,
+                                                confidence, evidence_state,
+                                                contradiction_status, evidence_refs)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(edge_id) DO UPDATE SET
                       relation=excluded.relation, detail=excluded.detail,
                       since=excluded.since, until=excluded.until,
-                      verified=excluded.verified""",
+                      verified=excluded.verified,
+                      source_observation_id=excluded.source_observation_id,
+                      source_session_id=excluded.source_session_id,
+                      observed_at=excluded.observed_at,
+                      validity_start=excluded.validity_start,
+                      validity_end=excluded.validity_end,
+                      confidence=excluded.confidence,
+                      evidence_state=excluded.evidence_state,
+                      contradiction_status=excluded.contradiction_status,
+                      evidence_refs=excluded.evidence_refs""",
                 (edge.edge_id, edge.site_id, edge.from_id, edge.from_type,
                  edge.to_id, edge.to_type, edge.relation, edge.detail,
-                 since, until, int(edge.verified))
+                 since, until, int(edge.verified), edge.source_observation_id,
+                 edge.source_session_id, observed_at, validity_start, validity_end,
+                 edge.confidence, edge.evidence_state, edge.contradiction_status,
+                 evidence_refs)
             )
         return edge
 
@@ -675,6 +741,13 @@ class TopologyRepo:
             (site_id,)
         ).fetchall()
         return [self._from_row(r) for r in rows]
+
+    def get(self, edge_id: str) -> Optional[TopologyEdge]:
+        row = self._db.conn.execute(
+            "SELECT * FROM topology_edges WHERE edge_id=?",
+            (edge_id,),
+        ).fetchone()
+        return self._from_row(row) if row else None
 
     def list_for_node(self, node_id: str) -> List[TopologyEdge]:
         rows = self._db.conn.execute(
@@ -696,6 +769,15 @@ class TopologyRepo:
             since=_parse_dt(row["since"]),
             until=_parse_dt(row["until"]),
             verified=bool(row["verified"]),
+            source_observation_id=row["source_observation_id"] if "source_observation_id" in row.keys() else None,
+            source_session_id=row["source_session_id"] if "source_session_id" in row.keys() else None,
+            observed_at=(_parse_dt(row["observed_at"]) or _parse_dt(row["since"])) if "observed_at" in row.keys() else _parse_dt(row["since"]),
+            validity_start=(_parse_dt(row["validity_start"]) or _parse_dt(row["since"])) if "validity_start" in row.keys() else _parse_dt(row["since"]),
+            validity_end=(_parse_dt(row["validity_end"]) or _parse_dt(row["until"])) if "validity_end" in row.keys() else _parse_dt(row["until"]),
+            confidence=(row["confidence"] or "observed") if "confidence" in row.keys() else "observed",
+            evidence_state=(row["evidence_state"] or "observed") if "evidence_state" in row.keys() else "observed",
+            contradiction_status=(row["contradiction_status"] or "none") if "contradiction_status" in row.keys() else "none",
+            evidence_refs=_load_json(row["evidence_refs"]) if "evidence_refs" in row.keys() else [],
         )
 
     def delete(self, edge_id: str) -> None:

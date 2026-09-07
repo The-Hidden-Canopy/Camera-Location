@@ -25,8 +25,13 @@ class DomainEvent:
     occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-def append_domain_event(db: Database, event: DomainEvent) -> DomainEvent:
-    """Append one event; callers must provide a non-empty justification."""
+def append_domain_event(db: Database, event: DomainEvent, *, commit: bool = True) -> DomainEvent:
+    """Append one event; callers must provide a non-empty justification.
+
+    Existing callers retain immediate-commit behavior.  Transactional
+    multi-record services can pass ``commit=False`` so the event and its
+    projection share one rollback boundary.
+    """
     if not event.justification.strip():
         raise ValueError("domain event justification is required")
     db.execute(
@@ -48,5 +53,6 @@ def append_domain_event(db: Database, event: DomainEvent) -> DomainEvent:
             event.occurred_at.isoformat(),
         ),
     )
-    db.conn.commit()
+    if commit:
+        db.conn.commit()
     return event

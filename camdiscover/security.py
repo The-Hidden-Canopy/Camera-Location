@@ -31,8 +31,18 @@ def set_token(token: str, nonce: str) -> None:
     _backend_nonce = nonce
 
 
+def clear_token() -> None:
+    """Clear a prior app-factory launch token before creating a new app."""
+    global _backend_token, _backend_nonce
+    _backend_token = None
+    _backend_nonce = None
+
+
 def get_token_from_env() -> Optional[str]:
-    return os.environ.get(ENV_TOKEN)
+    # ``create_app`` receives the launch token directly from Electron and
+    # keeps it in-process. Prefer that value so the request gate and the
+    # decorator enforce the same authentication boundary.
+    return _backend_token or os.environ.get(ENV_TOKEN)
 
 
 def get_nonce_from_env() -> Optional[str]:

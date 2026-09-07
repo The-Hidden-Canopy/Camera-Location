@@ -263,6 +263,15 @@ class TopologyEdge:
     since: Optional[datetime] = None
     until: Optional[datetime] = None
     verified: bool = False
+    source_observation_id: Optional[str] = None
+    source_session_id: Optional[str] = None
+    observed_at: Optional[datetime] = None
+    validity_start: Optional[datetime] = None
+    validity_end: Optional[datetime] = None
+    confidence: str = "observed"
+    evidence_state: str = "observed"
+    contradiction_status: str = "none"
+    evidence_refs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -277,6 +286,15 @@ class TopologyEdge:
             "since":     self.since.isoformat() if self.since else None,
             "until":     self.until.isoformat() if self.until else None,
             "verified":  self.verified,
+            "source_observation_id": self.source_observation_id,
+            "source_session_id": self.source_session_id,
+            "observed_at": self.observed_at.isoformat() if self.observed_at else None,
+            "validity_start": self.validity_start.isoformat() if self.validity_start else None,
+            "validity_end": self.validity_end.isoformat() if self.validity_end else None,
+            "confidence": self.confidence,
+            "evidence_state": self.evidence_state,
+            "contradiction_status": self.contradiction_status,
+            "evidence_refs": list(self.evidence_refs),
         }
 
 

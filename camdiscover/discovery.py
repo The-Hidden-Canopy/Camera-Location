@@ -294,9 +294,10 @@ def _parse_ssdp_response(response: str, ip: str, port: int) -> Optional[SsdpDevi
 def scan_port(ip: str, port: int, timeout: float = 3.0) -> bool:
     """Check if a TCP port is open."""
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
         sock.settimeout(timeout)
-        result = sock.connect_ex((ip, port))
+        result = sock.connect_ex((ip, port, 0, 0) if family == socket.AF_INET6 else (ip, port))
         sock.close()
         return result == 0
     except Exception:

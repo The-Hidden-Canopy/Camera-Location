@@ -226,6 +226,8 @@ def get_topology(site_id: str):
 @api.route("/sites/<site_id>/topology", methods=["POST"])
 def add_topology_edge(site_id: str):
     body = request.json or {}
+    if not str(body.get("justification", "")).strip():
+        return jsonify({"error": "topology justification is required"}), 400
     try:
         edge = TopologyService(_db()).add_edge(
             site_id=site_id,
@@ -236,6 +238,9 @@ def add_topology_edge(site_id: str):
             relation=body.get("relation", ""),
             detail=body.get("detail", ""),
             verified=bool(body.get("verified", False)),
+            verification_evidence=body.get("verification_evidence", ""),
+            justification=body.get("justification", ""),
+            actor=body.get("actor", "operator"),
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
