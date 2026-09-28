@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en" data-mode="listen">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hidden Canopy Network Discovery</title>
+  <link rel="stylesheet" href="/static/css/shell.css">
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+  <div class="cam" id="app">
+
+    <!-- ═══ Electron Title Bar (shown only in desktop mode) ═══ -->
+    <div class="cam__titlebar" id="electron-titlebar" style="display:none;">
+      <div class="cam__titlebar__drag">
+        <span class="cam__titlebar__icon">&#9673;</span>
+        <span class="cam__titlebar__title">Hidden Canopy Network Discovery</span>
+      </div>
+      <div class="cam__titlebar__controls">
+        <button class="cam__titlebar__btn cam__titlebar__btn--minimize" id="btn-minimize" title="Minimize">&#9472;</button>
+        <button class="cam__titlebar__btn cam__titlebar__btn--maximize" id="btn-maximize" title="Maximize">&#9723;</button>
+        <button class="cam__titlebar__btn cam__titlebar__btn--close" id="btn-close" title="Close">&#10005;</button>
+      </div>
+    </div>
+
+    <!-- ═══ Global Header ═══ -->
+    <header class="cam__header">
+      <div class="cam__header-brand">
+        <span class="cam__brand-icon">&#9673;</span>
+        NETWORK DISCOVERY
+      </div>
+      <div class="cam__header-divider"></div>
+
+      <select class="cam__iface-select" id="iface-select">
+        <option value="">Select Interface...</option>
+      </select>
+
+      <div class="cam__header-divider"></div>
+
+      <div class="cam__mode-tabs" id="mode-tabs">
+        <button class="cam__mode-tab cam__mode-tab--active" data-mode="listen">
+          <span class="cam__mode-icon">&#9678;</span> Listen
+        </button>
+        <button class="cam__mode-tab" data-mode="dhcp-trap">
+          <span class="cam__mode-icon">&#9672;</span> DHCP Trap
+        </button>
+        <button class="cam__mode-tab" data-mode="sweep">
+          <span class="cam__mode-icon">&#9881;</span> Sweep
+        </button>
+        <button class="cam__mode-tab" data-mode="fingerprint">
+          <span class="cam__mode-icon">&#9756;</span> Fingerprint
+        </button>
+        <button class="cam__mode-tab" data-mode="dpi">
+          <span class="cam__mode-icon">&#128065;</span> DPI
+        </button>
+        <button class="cam__mode-tab" data-mode="report">
+          <span class="cam__mode-icon">&#9998;</span> Report
+        </button>
+      </div>
+
+      <div class="cam__header-spacer"></div>
+
+      <select class="cam__iface-select" id="site-select" title="Persisted site binding">
+        <option value="">No Site Bound</option>
+      </select>
+
+      <div class="cam__header-divider"></div>
+
+      <button class="cam__export-btn" id="inventory-toggle" title="Toggle between live session and persisted inventory">
+        Live View
+      </button>
+
+      <div class="cam__header-divider"></div>
+
+      <div class="cam__status-indicators">
+        <div class="cam__capture-pos" id="capture-pos" title="Capture position — click to change">
+          <span class="cam__capture-pos__icon" id="capture-pos-icon">&#9681;</span>
+          <span class="cam__capture-pos__label" id="capture-pos-label">Ethernet</span>
+        </div>
+        <div class="cam__header-divider"></div>
+        <div class="cam__status-dot" id="scan-status">
+          <span class="cam__status-dot__icon cam__status-dot__icon--idle"></span>
+          <span class="cam__status-dot__label">Idle</span>
+        </div>
+        <div class="cam__device-count" id="device-count">
+          <span class="cam__device-count__num">0</span> devices
+        </div>
+      </div>
+
+      <div class="cam__header-divider"></div>
+
+      <button class="cam__scan-btn cam__scan-btn--start" id="scan-btn">
+        <span class="cam__scan-btn__icon">&#9654;</span> Start Scan
+      </button>
+      <button class="cam__clear-btn" id="clear-btn" title="Clear all discovered devices and start fresh">
+        &#10005; Clear
+      </button>
+
+      <div class="cam__header-divider"></div>
+
+      <button class="cam__watch-btn" id="watch-btn" title="Subnet Watch — continuously sniff for new subnets and auto-scan them">
+        <span class="cam__watch-btn__dot"></span> Watch
+      </button>
+
+      <div class="cam__header-divider"></div>
+
+      <div class="cam__export-group">
+        <button class="cam__export-btn" id="export-csv" title="Export CSV">&#8615; CSV</button>
+        <button class="cam__export-btn" id="export-json" title="Export JSON">&#8615; JSON</button>
+        <button class="cam__export-btn" id="export-html" title="Export HTML Report">&#8615; HTML</button>
+      </div>
+    </header>
+
+    <!-- ═══ Sweep Subnet Bar (only shown when Sweep mode is active) ═══ -->
+    <div class="cam__sweep-bar" id="sweep-bar">
+      <span class="cam__sweep-bar__label">Target subnets</span>
+      <input type="text" id="sweep-subnets" class="cam__sweep-bar__input"
+             placeholder="172.16.1-22.0/24, 192.168.1.0/24  —  leave blank to auto-detect"
+             title="Enter comma-separated subnets or use range notation: 172.16.1-22.0/24">
+      <span class="cam__sweep-bar__hint">Ranges like <code>172.16.1-22.0/24</code> expand to individual /24s. A temporary IP is added for each unreachable subnet.</span>
+    </div>
+
+    <!-- ═══ Body ═══ -->
+    <div class="cam__body">
+
+      <!-- ─── Sidebar ─── -->
+      <aside class="cam__sidebar" id="sidebar">
+        <div class="cam__sidebar-toggle">
+          <button id="sidebar-collapse" title="Toggle sidebar">&#9664;</button>
+        </div>
+
+        <div class="cam__sidebar-section">
+          <div class="cam__sidebar-section-label">Vendors</div>
+          <div class="cam__sidebar-filters" id="vendor-filters">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+
+        <div class="cam__sidebar-section">
+          <div class="cam__sidebar-section-label">Device Types</div>
+          <div class="cam__sidebar-filters" id="type-filters">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+
+        <div class="cam__sidebar-section">
+          <div class="cam__sidebar-section-label">Protocols</div>
+          <div class="cam__sidebar-filters" id="protocol-filters">
+            <label class="cam__filter-item">
+              <input type="checkbox" value="ONVIF" checked> ONVIF
+              <span class="cam__filter-count" data-protocol="ONVIF">0</span>
+            </label>
+            <label class="cam__filter-item">
+              <input type="checkbox" value="RTSP" checked> RTSP
+              <span class="cam__filter-count" data-protocol="RTSP">0</span>
+            </label>
+            <label class="cam__filter-item">
+              <input type="checkbox" value="HTTP" checked> HTTP
+              <span class="cam__filter-count" data-protocol="HTTP">0</span>
+            </label>
+            <label class="cam__filter-item">
+              <input type="checkbox" value="SSDP" checked> SSDP/UPnP
+              <span class="cam__filter-count" data-protocol="SSDP">0</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="cam__sidebar-section">
+          <div class="cam__sidebar-section-label">Camera Confidence</div>
+          <div class="cam__confidence-slider">
+            <input type="range" min="0" max="100" value="0" id="confidence-filter" class="cam__slider">
+            <span class="cam__confidence-val" id="confidence-val">0%+</span>
+          </div>
+        </div>
+
+        <div class="cam__sidebar-section">
+          <div class="cam__sidebar-section-label">Subnets</div>
+          <div class="cam__sidebar-filters" id="subnet-filters">
+            <!-- Populated dynamically -->
+          </div>
+          <button class="cam__sidebar-add-btn" id="add-subnet-btn" title="Add subnet zone">+ Add Subnet</button>
+        </div>
+
+        <div class="cam__sidebar-section">
+          <div class="cam__sidebar-section-label">DPI Overview</div>
+          <div class="cam__stats-grid" id="dpi-stats-grid">
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-dpi-validated">0</span>
+              <span class="cam__stat-label">Validated</span>
+            </div>
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-dpi-issues">0</span>
+              <span class="cam__stat-label">Issues</span>
+            </div>
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-dpi-avg-score">—</span>
+              <span class="cam__stat-label">Avg Score</span>
+            </div>
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-subnet-zones">0</span>
+              <span class="cam__stat-label">Zones</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="cam__sidebar-section cam__sidebar-section--bottom">
+          <div class="cam__sidebar-section-label">Quick Stats</div>
+          <div class="cam__stats-grid" id="stats-grid">
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-total">0</span>
+              <span class="cam__stat-label">Total</span>
+            </div>
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-cameras">0</span>
+              <span class="cam__stat-label">Camera-like</span>
+            </div>
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-onvif">0</span>
+              <span class="stat-label">ONVIF</span>
+            </div>
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-rtsp">0</span>
+              <span class="cam__stat-label">RTSP</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- ─── Main Workspace ─── -->
+      <main class="cam__workspace" id="workspace">
+
+        <!-- Progress bar -->
+        <div class="cam__progress" id="progress-bar" style="display:none;">
+          <div class="cam__progress-fill" id="progress-fill"></div>
+          <div class="cam__progress-text" id="progress-text">Starting...</div>
+        </div>
+
+        <!-- Search / filter bar -->
+        <div class="cam__toolbar">
+          <div class="cam__search-box">
+            <span class="cam__search-icon">&#128269;</span>
+            <input type="text" id="search-input" placeholder="Search IP, MAC, vendor, model..." class="cam__search-input">
+          </div>
+          <div class="cam__toolbar-actions">
+            <button class="cam__toolbar-btn" id="btn-expand-all" title="Expand all rows">&#9660;</button>
+            <button class="cam__toolbar-btn" id="btn-collapse-all" title="Collapse all rows">&#9650;</button>
+          </div>
+        </div>
+
+        <!-- Device table -->
+        <div class="cam__table-wrap" id="table-wrap">
+          <table class="cam__table" id="device-table">
+            <thead>
+              <tr>
+                <th class="cam__th cam__th--expand"></th>
+                <th class="cam__th cam__th--ip" data-sort="ip">IP</th>
+                <th class="cam__th cam__th--mac" data-sort="mac">MAC</th>
+                <th class="cam__th cam__th--vendor" data-sort="vendor">Vendor</th>
+                <th class="cam__th cam__th--model" data-sort="model">Model</th>
+                <th class="cam__th cam__th--ports" data-sort="ports">Ports</th>
+                <th class="cam__th cam__th--onvif">ONVIF</th>
+                <th class="cam__th cam__th--rtsp">RTSP</th>
+                <th class="cam__th cam__th--dpi">DPI</th>
+                <th class="cam__th cam__th--confidence" data-sort="confidence">Score</th>
+                <th class="cam__th cam__th--actions">Links</th>
+              </tr>
+            </thead>
+            <tbody id="device-tbody">
+              <tr class="cam__empty-row">
+                <td colspan="11">
+                  <div class="cam__empty-state">
+                    <div class="cam__empty-icon">&#9673;</div>
+                    <div class="cam__empty-text">No devices discovered yet</div>
+                    <div class="cam__empty-hint">Select an interface and start a scan</div>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Device detail panel (slide-in) -->
+        <div class="cam__detail-panel" id="detail-panel">
+          <div class="cam__detail-header">
+            <span class="cam__detail-title" id="detail-title">Device Details</span>
+            <button class="cam__detail-close" id="detail-close">&times;</button>
+          </div>
+          <div class="cam__detail-body" id="detail-body">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+
+      </main>
+    </div>
+
+    <!-- ═══ Bottom Tray (Triage + Lost/Mismatched) ═══ -->
+    <div class="cam__tray cam__tray--collapsed" id="bottom-tray">
+      <div class="cam__tray__header" id="bottom-tray-header">
+        <div class="cam__tray__tabs">
+          <button class="cam__tray__tab cam__tray__tab--active" data-tray-tab="triage">
+            <span class="cam__tray__badge" id="tray-badge-triage">0</span> Triage Engine
+          </button>
+          <button class="cam__tray__tab" data-tray-tab="lost">
+            <span class="cam__tray__badge" id="tray-badge-lost">0</span> Lost / Mismatched
+          </button>
+        </div>
+        <div class="cam__tray__actions">
+          <button class="cam__tray__btn" id="tray-ingest" title="Ingest out-of-band evidence">+ Ingest</button>
+          <button class="cam__tray__btn" id="tray-refresh" title="Refresh now">&#8635;</button>
+          <button class="cam__tray__toggle" id="tray-toggle" title="Expand/collapse tray">&#9650;</button>
+        </div>
+      </div>
+      <div class="cam__tray__body" id="bottom-tray-body">
+        <div class="cam__tray__panel cam__tray__panel--active" id="tray-panel-triage">
+          <div class="cam__tray__empty">Loading triage state…</div>
+        </div>
+        <div class="cam__tray__panel" id="tray-panel-lost">
+          <div class="cam__tray__empty">Loading lost devices…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Activity Bar ═══ -->
+    <footer class="cam__activity-bar">
+      <span class="cam__activity-label">LIVE</span>
+      <div class="cam__activity-ticker" id="activity-ticker">
+        <div class="cam__activity-ticker__inner" id="ticker-inner">
+          <span class="cam__activity-event">
+            <span class="cam__activity-event__dot cam__activity-event__dot--idle"></span>
+            Waiting for scan...
+          </span>
+        </div>
+      </div>
+      <span class="cam__activity-time" id="scan-time">00:00</span>
+    </footer>
+
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

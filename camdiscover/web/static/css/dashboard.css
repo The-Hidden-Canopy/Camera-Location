@@ -1,0 +1,946 @@
+/*
+ * dashboard.css — Device table and detail panel styles
+ */
+
+/* ─── Device table ───────────────────────────────────────────────────────── */
+.cam__table-wrap {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0;
+}
+
+.cam__table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.cam__th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-label);
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-mid);
+  white-space: nowrap;
+  z-index: 5;
+  cursor: default;
+  user-select: none;
+}
+.cam__th[data-sort] { cursor: pointer; }
+.cam__th[data-sort]:hover { color: var(--accent-cyan); }
+.cam__th--sort-asc::after  { content: ' \25B2'; font-size: 8px; }
+.cam__th--sort-desc::after { content: ' \25BC'; font-size: 8px; }
+
+/* Column widths */
+.cam__th--expand     { width: 28px; }
+.cam__th--ip         { width: 130px; }
+.cam__th--mac        { width: 140px; }
+.cam__th--vendor     { width: 140px; }
+.cam__th--model      { width: 120px; }
+.cam__th--ports      { width: 160px; }
+.cam__th--onvif      { width: 60px; }
+.cam__th--rtsp       { width: 60px; }
+.cam__th--dpi        { width: 100px; }
+.cam__th--confidence { width: 60px; }
+.cam__th--actions    { width: 100px; }
+
+.cam__tr {
+  border-bottom: 1px solid var(--border-dim);
+  transition: background .1s;
+}
+.cam__tr:hover { background: var(--bg-hover); }
+.cam__tr--selected { background: rgba(34,211,238,.06); }
+.cam__tr--persisted {
+  background: rgba(34,211,238,.03);
+}
+.cam__tr--persisted:hover {
+  background: rgba(34,211,238,.08);
+}
+
+.cam__td {
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.cam__td--ip {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.cam__td--mac {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.cam__td--vendor {
+  font-weight: 500;
+}
+
+/* Vendor color coding */
+.cam__vendor-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+.cam__vendor-badge--hikvision   { background: rgba(59,130,246,.15); color: #60a5fa; }
+.cam__vendor-badge--dahua       { background: rgba(239,68,68,.15); color: #f87171; }
+.cam__vendor-badge--amcrest     { background: rgba(239,68,68,.15); color: #f87171; }
+.cam__vendor-badge--axis        { background: rgba(34,197,94,.15); color: #4ade80; }
+.cam__vendor-badge--hanwha      { background: rgba(245,158,11,.15); color: #fbbf24; }
+.cam__vendor-badge--bosch       { background: rgba(107,114,128,.15); color: #9ca3af; }
+.cam__vendor-badge--reolink     { background: rgba(139,92,246,.15); color: #a78bfa; }
+.cam__vendor-badge--uniview     { background: rgba(20,184,166,.15); color: #2dd4bf; }
+.cam__vendor-badge--vivotek     { background: rgba(249,115,22,.15); color: #fb923c; }
+.cam__vendor-badge--avigilon    { background: rgba(99,102,241,.15); color: #818cf8; }
+.cam__vendor-badge--lorex       { background: rgba(156,163,175,.15); color: #d1d5db; }
+.cam__vendor-badge--generic     { background: rgba(107,114,128,.1); color: #6b7280; }
+.cam__vendor-badge--unknown     { background: rgba(107,114,128,.08); color: #4b5563; }
+
+.cam__record-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  background: rgba(34,211,238,.12);
+  color: #67e8f9;
+}
+
+.cam__td--ports {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.cam__port-tag {
+  display: inline-block;
+  padding: 1px 4px;
+  border-radius: 2px;
+  margin-right: 3px;
+  font-size: 9px;
+  font-weight: 600;
+}
+.cam__port-tag--http   { background: rgba(106,138,176,.15); color: #7a9ab8; }
+.cam__port-tag--https  { background: rgba(74,144,201,.15); color: #5a9ac9; }
+.cam__port-tag--rtsp   { background: rgba(245,158,11,.15); color: #f59e0b; }
+.cam__port-tag--onvif  { background: rgba(34,211,238,.15); color: #22d3ee; }
+.cam__port-tag--dahua  { background: rgba(239,68,68,.12); color: #ef4444; }
+.cam__port-tag--hik    { background: rgba(59,130,246,.12); color: #3b82f6; }
+.cam__port-tag--other  { background: rgba(107,114,128,.1); color: #6b7280; }
+
+/* Status indicators */
+.cam__status-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+}
+.cam__status-indicator--found {
+  background: rgba(34,197,94,.15);
+  color: #22c55e;
+}
+.cam__status-indicator--error {
+  background: rgba(201,64,64,.15);
+  color: #c94040;
+}
+.cam__status-indicator--unchecked {
+  background: rgba(107,114,128,.1);
+  color: #4b5563;
+}
+
+/* Confidence score */
+.cam__confidence-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.cam__confidence-fill {
+  width: 32px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-bright);
+  overflow: hidden;
+}
+.cam__confidence-fill__inner {
+  height: 100%;
+  border-radius: 2px;
+  transition: width .3s ease;
+}
+.cam__confidence-fill__inner--high   { background: var(--accent-green); }
+.cam__confidence-fill__inner--medium { background: var(--warn); }
+.cam__confidence-fill__inner--low    { background: var(--error); }
+
+.cam__confidence-val {
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+.cam__confidence-val--high   { color: var(--accent-green); }
+.cam__confidence-val--medium { color: var(--warn); }
+.cam__confidence-val--low    { color: var(--error); }
+
+/* Action links */
+.cam__action-links {
+  display: flex;
+  gap: 4px;
+}
+.cam__action-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all .1s;
+  border: 1px solid transparent;
+}
+.cam__action-link--web {
+  background: rgba(106,138,176,.1);
+  color: #6a8ab0;
+}
+.cam__action-link--web:hover {
+  background: rgba(106,138,176,.2);
+  border-color: rgba(106,138,176,.3);
+}
+.cam__action-link--rtsp {
+  background: rgba(245,158,11,.1);
+  color: #f59e0b;
+}
+.cam__action-link--rtsp:hover {
+  background: rgba(245,158,11,.2);
+  border-color: rgba(245,158,11,.3);
+}
+.cam__action-link--onvif {
+  background: rgba(34,211,238,.1);
+  color: #22d3ee;
+}
+.cam__action-link--onvif:hover {
+  background: rgba(34,211,238,.2);
+  border-color: rgba(34,211,238,.3);
+}
+
+/* Expand row button */
+.cam__expand-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px;
+  transition: transform .15s;
+}
+.cam__expand-btn--open { transform: rotate(90deg); }
+
+/* Expanded detail row */
+.cam__detail-row td {
+  padding: 0;
+  border-bottom: 1px solid var(--border-dim);
+}
+.cam__detail-expand {
+  padding: 12px 16px 12px 38px;
+  background: rgba(12,15,22,.6);
+}
+.cam__detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+}
+.cam__detail-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cam__detail-field__label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+.cam__detail-field__value {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+.cam__detail-field__value a {
+  color: var(--accent-cyan);
+  text-decoration: none;
+}
+.cam__detail-field__value a:hover {
+  text-decoration: underline;
+}
+
+.cam__detail-field__value--mono {
+  font-family: var(--font-mono);
+}
+
+/* ─── Empty state ────────────────────────────────────────────────────────── */
+.cam__empty-row td {
+  padding: 60px 20px;
+  text-align: center;
+}
+.cam__empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.cam__empty-icon {
+  font-size: 36px;
+  color: var(--border-bright);
+}
+.cam__empty-text {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.cam__empty-hint {
+  font-size: 11px;
+  color: var(--text-label);
+}
+
+/* ─── Detail panel (slide-in) ────────────────────────────────────────────── */
+.cam__detail-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 380px;
+  height: 100%;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border-mid);
+  z-index: 60;
+  transform: translateX(100%);
+  transition: transform .2s ease;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 20px rgba(0,0,0,.3);
+}
+.cam__detail-panel--open {
+  transform: translateX(0);
+}
+
+.cam__detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-mid);
+}
+.cam__detail-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+.cam__detail-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.cam__detail-close:hover { color: var(--text-primary); }
+
+.cam__detail-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.cam__detail-section {
+  margin-bottom: 20px;
+}
+.cam__detail-section-title {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-label);
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.cam__detail-kv {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 6px 10px;
+  font-size: 12px;
+}
+.cam__detail-kv dt {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.cam__detail-kv dd {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  word-break: break-all;
+  margin: 0;
+}
+.cam__detail-kv dd a {
+  color: var(--accent-cyan);
+  text-decoration: none;
+}
+.cam__detail-kv dd a:hover { text-decoration: underline; }
+
+.cam__detail-ports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.cam__detail-raw {
+  margin-top: 12px;
+}
+.cam__detail-raw pre {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-base);
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-dim);
+  overflow-x: auto;
+  max-height: 200px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+}
+
+/* ─── DPI Stage Bar ─────────────────────────────────────────────────────── */
+.cam__dpi-bar {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+.cam__dpi-stage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.cam__dpi-stage-dot--pass  { background: var(--accent-green); }
+.cam__dpi-stage-dot--fail  { background: var(--error); }
+.cam__dpi-stage-dot--unchecked { background: var(--border-bright); }
+.cam__dpi-stage-dot--na    { background: var(--text-label); opacity: .4; }
+.cam__dpi-score {
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  margin-left: 4px;
+  color: var(--accent-cyan);
+}
+.cam__dpi-score--high   { color: var(--accent-green); }
+.cam__dpi-score--medium { color: var(--warn); }
+.cam__dpi-score--low    { color: var(--error); }
+
+/* ─── DPI Detail in expanded row ────────────────────────────────────────── */
+.cam__dpi-stage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+.cam__dpi-stage-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-dim);
+  font-size: 11px;
+}
+.cam__dpi-stage-item__icon {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.cam__dpi-stage-item__icon--pass  { background: var(--accent-green); }
+.cam__dpi-stage-item__icon--fail  { background: var(--error); }
+.cam__dpi-stage-item__icon--unchecked { background: var(--border-bright); }
+.cam__dpi-stage-item__icon--na    { background: var(--text-label); opacity: .4; }
+.cam__dpi-stage-item__label {
+  color: var(--text-muted);
+}
+.cam__dpi-stage-item__detail {
+  font-size: 9px;
+  color: var(--text-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Subnet Zone Card ──────────────────────────────────────────────────── */
+.cam__detail-alert {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: var(--radius-sm);
+}
+.cam__detail-alert__label {
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  flex: 0 0 auto;
+}
+.cam__detail-alert__text {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.cam__evidence-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.cam__evidence-item {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+}
+.cam__evidence-item__weight {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.cam__evidence-item__weight--pos { color: var(--accent-green); }
+.cam__evidence-item__weight--neg { color: var(--error); }
+.cam__evidence-item__body {
+  min-width: 0;
+}
+.cam__evidence-item__detail {
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.cam__evidence-item__meta {
+  margin-top: 2px;
+  color: var(--text-label);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.cam__subnet-zone-card {
+  background: var(--bg-input);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  margin: 3px 12px;
+  font-size: 11px;
+}
+.cam__subnet-zone-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+.cam__subnet-zone-card__subnet {
+  font-family: var(--font-mono);
+  color: var(--accent-cyan);
+  font-size: 10px;
+  font-weight: 600;
+}
+.cam__subnet-zone-card__label {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.cam__subnet-zone-card__meta {
+  display: flex;
+  gap: 6px;
+  font-size: 9px;
+  color: var(--text-label);
+}
+.cam__subnet-zone-card__delete {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.cam__subnet-zone-card__delete:hover { color: var(--error); }
+
+/* ─── Add Subnet Dialog ─────────────────────────────────────────────────── */
+.cam__subnet-dialog {
+  position: fixed;
+  inset: 0;
+  background: rgba(8,9,13,.85);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cam__subnet-dialog__inner {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-md);
+  padding: 20px 24px;
+  width: 400px;
+  max-width: 90vw;
+}
+.cam__subnet-dialog__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 14px;
+}
+.cam__subnet-dialog__field {
+  margin-bottom: 10px;
+}
+.cam__subnet-dialog__field label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text-label);
+  margin-bottom: 3px;
+}
+.cam__subnet-dialog__field input,
+.cam__subnet-dialog__field select {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  outline: none;
+}
+.cam__subnet-dialog__field input:focus,
+.cam__subnet-dialog__field select:focus {
+  border-color: var(--accent-cyan);
+}
+.cam__subnet-dialog__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+.cam__subnet-dialog__btn {
+  padding: 5px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid;
+}
+.cam__subnet-dialog__btn--add {
+  background: rgba(34,211,238,.12);
+  border-color: rgba(34,211,238,.3);
+  color: var(--accent-cyan);
+}
+.cam__subnet-dialog__btn--add:hover {
+  background: rgba(34,211,238,.2);
+}
+.cam__subnet-dialog__btn--cancel {
+  background: var(--bg-input);
+  border-color: var(--border-bright);
+  color: var(--text-muted);
+}
+
+/* ─── Capture Position Dialog ───────────────────────────────────────────── */
+.cam__capture-dialog {
+  position: fixed;
+  inset: 0;
+  background: rgba(8,9,13,.85);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cam__capture-dialog__inner {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-md);
+  padding: 20px 24px;
+  width: 480px;
+  max-width: 90vw;
+}
+.cam__capture-dialog__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 14px;
+}
+.cam__capture-dialog__option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: all .12s;
+}
+.cam__capture-dialog__option:hover {
+  background: var(--bg-input);
+  border-color: var(--border-bright);
+}
+.cam__capture-dialog__option--selected {
+  border-color: var(--accent-cyan);
+  background: rgba(34,211,238,.06);
+}
+.cam__capture-dialog__option__icon {
+  font-size: 16px;
+  width: 24px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.cam__capture-dialog__option__text {
+  flex: 1;
+}
+.cam__capture-dialog__option__label {
+  font-size: 12px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.cam__capture-dialog__option__desc {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.cam__capture-dialog__option__vis {
+  display: flex;
+  gap: 3px;
+}
+.cam__capture-dialog__option__vis-tag {
+  font-size: 8px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-weight: 600;
+}
+.cam__capture-dialog__option__vis-tag--yes { background: rgba(34,197,94,.12); color: #22c55e; }
+.cam__capture-dialog__option__vis-tag--no  { background: rgba(201,64,64,.12); color: #c94040; }
+.cam__capture-dialog__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* ─── Action link extras ─────────────────────────────────────────────────── */
+.cam__action-link--view  { background: rgba(234,179,8,.10); color: #eab308; }
+.cam__action-link--setip { background: rgba(139,92,246,.12); color: #a78bfa; }
+
+/* ─── Camera Viewer ──────────────────────────────────────────────────────── */
+.cam__viewer-overlay {
+  position: fixed; inset: 0; z-index: 900;
+  background: rgba(0,0,0,.75);
+  display: flex; align-items: center; justify-content: center;
+}
+.cam__viewer {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-bright);
+  border-radius: 8px;
+  width: 720px; max-width: 96vw;
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex; flex-direction: column;
+  box-shadow: 0 24px 48px rgba(0,0,0,.6);
+}
+.cam__viewer__header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-mid);
+}
+.cam__viewer__title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.cam__viewer__close {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 18px; cursor: pointer; padding: 0 4px; line-height: 1;
+}
+.cam__viewer__close:hover { color: var(--text-primary); }
+.cam__viewer__snapshot-wrap {
+  position: relative; background: #000;
+  min-height: 240px; display: flex; align-items: center; justify-content: center;
+}
+.cam__viewer__img {
+  max-width: 100%; max-height: 480px;
+  display: block; margin: auto;
+  transition: opacity .2s;
+}
+.cam__viewer__snap-error {
+  color: var(--text-muted); font-size: 12px; text-align: center;
+  padding: 40px 20px;
+}
+.cam__viewer__controls {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-mid);
+}
+.cam__viewer__btn {
+  font-size: 11px; font-weight: 600;
+  padding: 5px 12px; border-radius: 4px; cursor: pointer;
+  background: rgba(99,102,241,.15); color: #818cf8;
+  border: 1px solid rgba(99,102,241,.3);
+  text-decoration: none;
+}
+.cam__viewer__btn:hover { background: rgba(99,102,241,.28); }
+.cam__viewer__btn--active { background: rgba(20,184,166,.2); color: var(--accent-teal); border-color: rgba(20,184,166,.4); }
+.cam__viewer__btn--active:hover { background: rgba(20,184,166,.32); }
+.cam__viewer__btn--setip { background: rgba(139,92,246,.15); color: #a78bfa; border-color: rgba(139,92,246,.3); }
+.cam__viewer__info {
+  padding: 10px 16px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.cam__viewer__info-row {
+  display: flex; align-items: baseline; gap: 10px; font-size: 11px;
+}
+.cam__viewer__info-label {
+  color: var(--text-label); font-size: 9px; text-transform: uppercase;
+  letter-spacing: .08em; min-width: 48px; font-weight: 600;
+}
+.cam__viewer__info-row code {
+  color: var(--text-secondary); font-family: monospace; font-size: 11px;
+  word-break: break-all;
+}
+.cam__viewer__auth {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-mid);
+  background: var(--bg-row-alt);
+}
+.cam__viewer__auth-label { font-size: 9px; color: var(--text-label); text-transform: uppercase; letter-spacing: .08em; }
+.cam__viewer__auth-input {
+  flex: 1; min-width: 100px; padding: 4px 8px;
+  background: var(--bg-input, var(--bg-row));
+  border: 1px solid var(--border-mid); border-radius: 3px;
+  color: var(--text-primary); font-size: 11px;
+}
+
+/* ─── Set IP Dialog ──────────────────────────────────────────────────────── */
+.cam__setip-dialog {
+  position: fixed; inset: 0; z-index: 910;
+  background: rgba(0,0,0,.65);
+  display: flex; align-items: center; justify-content: center;
+}
+.cam__setip-dialog__inner {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-bright);
+  border-radius: 8px;
+  width: 380px; max-width: 96vw;
+  padding: 20px;
+  box-shadow: 0 24px 48px rgba(0,0,0,.5);
+}
+.cam__setip-dialog__title {
+  font-size: 14px; font-weight: 700; color: var(--text-primary);
+  margin-bottom: 10px;
+}
+.cam__setip-info {
+  font-size: 11px; color: var(--text-muted);
+  margin-bottom: 14px;
+  display: flex; align-items: center; gap: 8px;
+}
+.cam__setip-field { margin-bottom: 10px; }
+.cam__setip-field label { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-label); margin-bottom: 3px; }
+.cam__setip-input {
+  width: 100%; padding: 6px 10px; box-sizing: border-box;
+  background: var(--bg-input, var(--bg-row));
+  border: 1px solid var(--border-mid); border-radius: 4px;
+  color: var(--text-primary); font-size: 12px;
+}
+.cam__setip-input:focus { outline: none; border-color: var(--accent, #6366f1); }
+.cam__setip-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.cam__setip-result {
+  margin-top: 10px; padding: 8px 10px;
+  border-radius: 4px; font-size: 11px; font-weight: 500;
+}
+.cam__setip-result--ok  { background: rgba(34,197,94,.12); color: #22c55e; }
+.cam__setip-result--err { background: rgba(201,64,64,.12); color: #f87171; }
+
+/* ─── Sweep Subnet Bar ───────────────────────────────────────────────────── */
+/* Hidden by default; shown only when [data-mode="sweep"] is set on .cam     */
+.cam__sweep-bar {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-mid);
+  font-size: 11px;
+}
+
+.cam[data-mode="sweep"] .cam__sweep-bar {
+  display: flex;
+}
+
+.cam__sweep-bar__label {
+  color: var(--text-label);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.cam__sweep-bar__input {
+  flex: 1;
+  max-width: 480px;
+  padding: 4px 10px;
+  background: var(--bg-input, var(--bg-row));
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+}
+.cam__sweep-bar__input:focus {
+  outline: none;
+  border-color: var(--accent, #6366f1);
+}
+.cam__sweep-bar__input::placeholder {
+  color: var(--text-muted, #4b5563);
+}
+
+.cam__sweep-bar__hint {
+  color: var(--text-label);
+  font-size: 10px;
+  opacity: .7;
+}
+.cam__sweep-bar__hint code {
+  background: rgba(99,102,241,.15);
+  color: var(--accent, #6366f1);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+}

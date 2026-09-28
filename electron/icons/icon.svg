@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Camera Discovery Octopus icon -->
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="#08090d" stroke="#22d3ee" stroke-width="4"/>
+  
+  <!-- Camera lens ring -->
+  <circle cx="256" cy="220" r="100" fill="none" stroke="#22d3ee" stroke-width="6" opacity="0.8"/>
+  <circle cx="256" cy="220" r="70" fill="none" stroke="#22d3ee" stroke-width="3" opacity="0.5"/>
+  <circle cx="256" cy="220" r="40" fill="#22d3ee" opacity="0.15"/>
+  <circle cx="256" cy="220" r="20" fill="#22d3ee" opacity="0.6"/>
+  
+  <!-- Camera body -->
+  <rect x="186" y="280" width="140" height="60" rx="8" fill="#0f141b" stroke="#22d3ee" stroke-width="3"/>
+  
+  <!-- Tentacle lines (discovery paths) -->
+  <path d="M196 340 Q180 380 160 400" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+  <path d="M216 340 Q210 390 200 420" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+  <path d="M236 340 Q236 395 240 430" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+  <path d="M276 340 Q276 395 272 430" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+  <path d="M296 340 Q302 390 312 420" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+  <path d="M316 340 Q332 380 352 400" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+  
+  <!-- Discovery dots at tentacle ends -->
+  <circle cx="160" cy="400" r="5" fill="#22c55e" opacity="0.9"/>
+  <circle cx="200" cy="420" r="5" fill="#22c55e" opacity="0.9"/>
+  <circle cx="240" cy="430" r="5" fill="#22d3ee" opacity="0.9"/>
+  <circle cx="272" cy="430" r="5" fill="#22d3ee" opacity="0.9"/>
+  <circle cx="312" cy="420" r="5" fill="#22c55e" opacity="0.9"/>
+  <circle cx="352" cy="400" r="5" fill="#22c55e" opacity="0.9"/>
+  
+  <!-- DPI stage dots in camera body -->
+  <circle cx="206" cy="310" r="4" fill="#22c55e"/>
+  <circle cx="224" cy="310" r="4" fill="#22c55e"/>
+  <circle cx="242" cy="310" r="4" fill="#22d3ee"/>
+  <circle cx="260" cy="310" r="4" fill="#eab308"/>
+  <circle cx="278" cy="310" r="4" fill="#22c55e"/>
+  <circle cx="296" cy="310" r="4" fill="#22c55e"/>
+  <circle cx="314" cy="310" r="4" fill="#3a5a78" opacity="0.5"/>
+</svg>

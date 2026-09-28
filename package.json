@@ -1,0 +1,76 @@
+{
+  "name": "hidden-canopy-network-discovery",
+  "version": "1.0.0",
+  "description": "Evidence-driven network discovery with camera intelligence - Electron desktop app",
+  "main": "electron/main.js",
+  "scripts": {
+    "stage:python-runtime": "node scripts/stage-python-runtime.js",
+    "start": "electron .",
+    "start:dev": "electron . --dev",
+    "pack": "npm run stage:python-runtime && electron-builder --dir",
+    "dist": "npm run stage:python-runtime && electron-builder",
+    "dist:win": "npm run stage:python-runtime && electron-builder --win",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "com.hiddencanopy.network-discovery",
+    "productName": "Hidden Canopy Network Discovery",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "camdiscover/**/*",
+      "camera-discover.py",
+      "!camdiscover/__pycache__",
+      "!**/*.pyc",
+      "!dist",
+      "!*.csv"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "electron/icons/icon.ico",
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Hidden Canopy Network Discovery",
+      "runAfterFinish": true
+    },
+    "extraResources": [
+      {
+        "from": ".bundled-runtime/python",
+        "to": "python"
+      },
+      {
+        "from": "camdiscover",
+        "to": "camdiscover"
+      },
+      {
+        "from": "camera-discover.py",
+        "to": "camera-discover.py"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {}
+}

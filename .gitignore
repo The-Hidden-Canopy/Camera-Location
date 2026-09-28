@@ -1,0 +1,36 @@
+# Node
+node_modules/
+dist/
+.npm/
+
+# Electron binaries
+electron/icons/*.ico
+electron/icons/*.png
+node_modules/electron/dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+build/
+*.egg
+.venv/
+venv/
+env/
+.bundled-runtime/
+.python-runtime/
+
+# Output files
+*.csv
+*.json
+!package.json
+!package-lock.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
