@@ -1,10 +1,17 @@
-# STOP BEFORE TOUCHING THIS REPOSITORY
+# Public Change Boundary
+
+This document defines the public repository boundary for Camera-Location.
+The application is a local discovery and evidence tool. Its public source
+does not grant access to private authority services, private repositories,
+credentials, device inventories, or deployment environments.
 
 ## Required First Read
 
 Read [`PROJECT_INTENT.md`](PROJECT_INTENT.md) before modifying discovery logic, subnet scanning, ARP handling, ONVIF or SADP probes, location records, device remediation, or operator verification workflows.
 
-For portfolio crossover changes, also read the [Portfolio Contract Packet](https://github.com/GB-THC/private training system/blob/main/PORTFOLIO_CONTRACT_PACKET.md) and [Deep Intent](https://github.com/GB-THC/private training system/blob/main/DEEP_INTENT.md).
+For an integration change, document the external contract locally and keep
+the integration optional. Do not add private service URLs, repository paths,
+tokens, credentials, or copied private implementation code to this tree.
 
 ## Project Intent
 
@@ -63,4 +70,7 @@ network observation
 
 ## Stop Condition
 
-If a change affects private governance system trust assignment, BraidSeal identity, automated remediation, model training, or facility authorization, stop and identify the owning repository before editing.
+If a change affects trust assignment, identity authority, automated
+remediation, model training, or facility authorization, stop and identify the
+owning service before editing. Camera-Location may emit bounded evidence and
+operator proposals; it must not silently claim or acquire that authority.

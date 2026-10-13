@@ -25,5 +25,5 @@ Camera-Location is released under the Apache License, Version 2.0 -- see
 - An IP address is not a durable identity.
 
 Read [PROJECT_INTENT.md](PROJECT_INTENT.md) and
-[STOP_BEFORE_TOUCHING_READ_ME.md](STOP_BEFORE_TOUCHING_READ_ME.md) before
-changing discovery or remediation behavior.
+[PUBLIC_CHANGE_BOUNDARY.md](PUBLIC_CHANGE_BOUNDARY.md) before changing
+discovery or remediation behavior.

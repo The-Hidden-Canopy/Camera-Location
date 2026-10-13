@@ -53,17 +53,19 @@ discovery != authorization
 reachable device != safe remediation target
 ```
 
-## Crossover Boundary
+## Integration Boundary
 
 ```text
 network observation
     -> DeviceDiscoveryCandidate
     -> operator verification
     -> PhysicalLocationVerificationEvent
-    -> optional private governance system DeviceIdentityEvent
+    -> optional governed-authority event
 ```
 
-private governance system or a facility-governance layer may assign trust and authorization. This repository should preserve the evidence required for that decision.
+An external facility-governance layer may assign trust and authorization. This
+repository preserves the evidence required for that decision but does not
+implement or imply that authority.
 
 ## Doctrine
 
@@ -77,6 +79,5 @@ Do not confuse visibility with legitimacy.
 
 ## Related Documents
 
-- [Portfolio Deep Intent](https://github.com/GB-THC/private training system/blob/main/DEEP_INTENT.md)
-- [Portfolio Contract Packet](https://github.com/GB-THC/private training system/blob/main/PORTFOLIO_CONTRACT_PACKET.md)
-- [Stop Before Touching](STOP_BEFORE_TOUCHING_READ_ME.md)
+- [Open Canopy Contract](OPEN_CANOPY_CONTRACT.md)
+- [Public change boundary](PUBLIC_CHANGE_BOUNDARY.md)
